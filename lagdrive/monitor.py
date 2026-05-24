@@ -188,8 +188,9 @@ class Monitor:
                     self.metrics.total_downloaded += bytes_down
                     self.metrics.total_uploaded += 200
                     self.metrics.update_throughput(mbps)
-        except Exception:
-            pass
+        except Exception as e:
+            import sys
+            print(f"[LagDrive] throughput probe failed: {e}", file=sys.stderr)
 
     # --- Capacity calculation ---
 
@@ -199,9 +200,10 @@ class Monitor:
     # --- Storage tick ---
 
     def _storage_tick(self) -> None:
-        if self._storage is None:
+        storage = self._storage
+        if storage is None:
             return
-        self._storage.update_metrics(self.metrics.rtt_avg, self.metrics.capacity)
+        storage.update_metrics(self.metrics.rtt_avg, self.metrics.capacity)
 
     # --- Grid state management ---
 
@@ -225,8 +227,9 @@ class Monitor:
 
         # Storage utilization → stored cells
         stored_count = 0
-        if self._storage is not None:
-            st = self._storage.stats
+        storage = self._storage
+        if storage is not None:
+            st = storage.stats
             cap = st.get("capacity_bytes", 0)
             used = st.get("used_bytes", 0)
             if cap > 0:
@@ -257,6 +260,7 @@ class Monitor:
     def get_snapshot(self) -> dict:
         """Return a copy of the current monitoring state (thread-safe)."""
         with self._lock:
+            storage = self._storage
             snap = {
                 "running": self._running,
                 "rtt_current": self.metrics.rtt_current,
@@ -271,7 +275,8 @@ class Monitor:
                 "probe_count": self.metrics.probe_count,
                 "fail_count": self.metrics.fail_count,
                 "quote": self._last_quote,
-                "storage": self._storage.stats if self._storage else None,
+                "storage": storage.stats if storage else None,
+                "grid": [[cell.state.value for cell in row] for row in self.grid],
             }
             return snap
 

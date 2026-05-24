@@ -96,5 +96,5 @@ Client (lagdrive)                    Echo Relay (--relay)
 ## Known Issues
 
 - **Dead dependency**: `psutil` is declared in `pyproject.toml` but never imported.
-- **Private member access across classes**: `LagDriveAPI.running` reads `self._monitor._running` directly; `__init__.py` reads `api._monitor.grid` directly.
+- **Private member access**: `LagDriveAPI.running` reads `self._monitor._running` directly.
 - **`_human_bytes` duplication**: Near-identical formatting in `api.py` and `dashboard.py`, differing only in decimal precision.

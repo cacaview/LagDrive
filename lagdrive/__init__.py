@@ -7,9 +7,10 @@ LagDrive — 将网络延迟模拟成虚拟硬盘的基准测试工具。
 延迟越高，链路中同时存在的比特流越多，理论"网线容量"越大。
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import argparse
+import random
 import signal
 import sys
 import threading
@@ -21,6 +22,36 @@ from rich.console import Console
 from .api import LagDriveAPI
 from .dashboard import Dashboard
 from .monitor import MonitorConfig
+
+
+# Sarcastic suffixes for status messages (shown ~40% of the time)
+_STATUS_SNARK = [
+    " 感谢你的信任。",
+    " 数据已上路。",
+    " 一切正常。暂时。",
+    " 这很 LagDrive。",
+    " 网线表示压力很大。",
+    " 路由器打了个喷嚏。",
+    " 数据正在祈祷。",
+    " 别高兴太早。",
+    " 今天运气不错。",
+    " 且行且珍惜。",
+]
+
+# Varied "cancelled" messages
+_CANCEL_MSGS = [
+    "已取消",
+    "操作中断",
+    "算了不弄了",
+    "好的没问题",
+]
+
+
+def _snarky(msg: str) -> str:
+    """40% chance to append a sarcastic comment to a status message."""
+    if random.random() < 0.4:
+        return msg + random.choice(_STATUS_SNARK)
+    return msg
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -145,8 +176,9 @@ def _cmd_snapshot(target: str, port: int, interval: float) -> None:
             _print_json(snap)
             print()
     except KeyboardInterrupt:
-        api.stop()
         console.print("\n已停止。")
+    finally:
+        api.stop()
 
 
 def _cmd_relay(host: str, port: int) -> None:
@@ -170,15 +202,17 @@ def _cmd_store(relay_host: str, relay_port: int, data: str) -> None:
         relay_host=relay_host, relay_port=relay_port,
     )
     api.start()
-    time.sleep(1.0)
-    result = api.write(data.encode("utf-8"))
-    console.print(f"\n[bold]写入结果[/bold]")
-    _print_json(result)
-    info = api.storage_info()
-    if info:
-        console.print(f"\n[bold]存储状态[/bold]")
-        _print_json(info)
-    api.stop()
+    try:
+        time.sleep(1.0)
+        result = api.write(data.encode("utf-8"))
+        console.print(f"\n[bold]写入结果[/bold]")
+        _print_json(result)
+        info = api.storage_info()
+        if info:
+            console.print(f"\n[bold]存储状态[/bold]")
+            _print_json(info)
+    finally:
+        api.stop()
 
 
 def _cmd_read(relay_host: str, relay_port: int, offset: int, length: int) -> None:
@@ -190,16 +224,18 @@ def _cmd_read(relay_host: str, relay_port: int, offset: int, length: int) -> Non
         relay_host=relay_host, relay_port=relay_port,
     )
     api.start()
-    time.sleep(1.0)
-    data = api.read(offset, length)
-    console.print(f"\n[bold]读取结果[/bold] (offset={offset}, length={length})")
     try:
-        text = data.decode("utf-8")
-        console.print(f"  文本: {text}")
-    except UnicodeDecodeError:
-        console.print(f"  Hex:  {data.hex()}")
-    console.print(f"  原始: {data!r}")
-    api.stop()
+        time.sleep(1.0)
+        data = api.read(offset, length)
+        console.print(f"\n[bold]读取结果[/bold] (offset={offset}, length={length})")
+        try:
+            text = data.decode("utf-8")
+            console.print(f"  文本: {text}")
+        except UnicodeDecodeError:
+            console.print(f"  Hex:  {data.hex()}")
+        console.print(f"  原始: {data!r}")
+    finally:
+        api.stop()
 
 
 def _cmd_storage_info(relay_host: str, relay_port: int) -> None:
@@ -211,13 +247,15 @@ def _cmd_storage_info(relay_host: str, relay_port: int) -> None:
         relay_host=relay_host, relay_port=relay_port,
     )
     api.start()
-    time.sleep(1.0)
-    info = api.storage_info()
-    if info:
-        _print_json(info)
-    else:
-        console.print("[red]存储未启用[/red]")
-    api.stop()
+    try:
+        time.sleep(1.0)
+        info = api.storage_info()
+        if info:
+            _print_json(info)
+        else:
+            console.print("[red]存储未启用[/red]")
+    finally:
+        api.stop()
 
 
 def _read_key() -> str | None:
@@ -238,8 +276,8 @@ def _read_key() -> str | None:
 
 def _handle_write(dashboard: Dashboard, api: LagDriveAPI) -> None:
     """Pause Live, prompt for data, write to storage, resume."""
-    if api._monitor._storage is None:
-        dashboard.update(status_msg="存储未启用")
+    if not api.storage_enabled:
+        dashboard.update(status_msg="存储未启用，按 S 启用")
         return
     if dashboard._live:
         dashboard._live.stop()
@@ -247,24 +285,25 @@ def _handle_write(dashboard: Dashboard, api: LagDriveAPI) -> None:
     try:
         data = console.input("\n[bold cyan]输入要写入的数据:[/bold cyan] ")
         if not data:
-            dashboard.update(status_msg="已取消")
+            dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
             return
         result = api.write(data.encode("utf-8"))
-        msg = f"写入成功 {result['bytes_written']} bytes ({result['blocks_written']} blocks)"
+        msg = _snarky(f"写入成功 {result['bytes_written']} bytes ({result['blocks_written']} blocks)")
         console.print(f"  [green]{msg}[/green]")
         console.print("  [dim]按任意键继续...[/dim]")
         _read_key_or_wait(3.0)
         dashboard.update(status_msg=msg)
     except (EOFError, KeyboardInterrupt):
-        dashboard.update(status_msg="已取消")
-    if dashboard._live:
-        dashboard._live.start()
+        dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
+    finally:
+        if dashboard._live:
+            dashboard._live.start()
 
 
 def _handle_read(dashboard: Dashboard, api: LagDriveAPI) -> None:
     """Pause Live, prompt for offset/length, read from storage, resume."""
-    if api._monitor._storage is None:
-        dashboard.update(status_msg="存储未启用")
+    if not api.storage_enabled:
+        dashboard.update(status_msg="存储未启用，按 S 启用")
         return
     if dashboard._live:
         dashboard._live.stop()
@@ -281,14 +320,15 @@ def _handle_read(dashboard: Dashboard, api: LagDriveAPI) -> None:
         except UnicodeDecodeError:
             console.print(f"  [yellow]Hex: {data.hex()}[/yellow]")
         console.print(f"  [dim]原始: {data!r}[/dim]")
-        msg = f"读取完成 {length} bytes"
+        msg = _snarky(f"读取完成 {length} bytes")
         console.print("  [dim]按任意键继续...[/dim]")
         _read_key_or_wait(3.0)
         dashboard.update(status_msg=msg)
     except (EOFError, KeyboardInterrupt, ValueError):
-        dashboard.update(status_msg="已取消")
-    if dashboard._live:
-        dashboard._live.start()
+        dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
+    finally:
+        if dashboard._live:
+            dashboard._live.start()
 
 
 def _handle_info(dashboard: Dashboard, api: LagDriveAPI) -> None:
@@ -310,16 +350,20 @@ def _handle_clear(dashboard: Dashboard, api: LagDriveAPI) -> None:
     """Clear all stored blocks."""
     result = api.clear_storage()
     if result.get("cleared"):
-        dashboard.update(status_msg=f"已清除 {result['blocks_cleared']} 个 blocks")
+        dashboard.update(status_msg=_snarky(f"已清除 {result['blocks_cleared']} 个 blocks"))
     else:
-        dashboard.update(status_msg="存储未启用")
+        dashboard.update(status_msg="存储未启用，按 S 启用")
 
 
 def _handle_toggle_storage(dashboard: Dashboard, api: LagDriveAPI) -> None:
     """Enable or disable storage at runtime."""
-    if api._monitor._storage is not None:
+    if api.storage_enabled:
         result = api.disable_storage()
-        dashboard.update(status_msg="存储已断开")
+        if result.get("disabled"):
+            disconnect_msgs = ["存储已断开。数据说拜拜。", "已断开。网线空了。", "存储断开。一切归零。", "已断开。数据随风而逝。"]
+            dashboard.update(status_msg=random.choice(disconnect_msgs))
+        else:
+            dashboard.update(status_msg=f"断开失败: {result.get('error')}")
         return
 
     if dashboard._live:
@@ -334,7 +378,7 @@ def _handle_toggle_storage(dashboard: Dashboard, api: LagDriveAPI) -> None:
         result = api.enable_storage(host, port)
         if result.get("enabled"):
             console.print(f"  [green]存储已启用 → {result['relay']}[/green]")
-            msg = f"存储已连接 {result['relay']}"
+            msg = _snarky(f"存储已连接 {result['relay']}")
         else:
             console.print(f"  [red]连接失败: {result.get('error')}[/red]")
             msg = f"连接失败: {result.get('error')}"
@@ -342,9 +386,10 @@ def _handle_toggle_storage(dashboard: Dashboard, api: LagDriveAPI) -> None:
         _read_key_or_wait(5.0)
         dashboard.update(status_msg=msg)
     except (EOFError, KeyboardInterrupt, ValueError):
-        dashboard.update(status_msg="已取消")
-    if dashboard._live:
-        dashboard._live.start()
+        dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
+    finally:
+        if dashboard._live:
+            dashboard._live.start()
 
 
 def _handle_probe_rtt(dashboard: Dashboard, api: LagDriveAPI) -> None:
@@ -353,19 +398,20 @@ def _handle_probe_rtt(dashboard: Dashboard, api: LagDriveAPI) -> None:
         dashboard._live.stop()
     console = Console()
     try:
-        target = api._config.target
-        port = api._config.port
+        target = api.target
+        port = api.port
         console.print(f"\n[bold]RTT 探测 → {target}:{port}[/bold]")
         result = LagDriveAPI.probe_rtt(target, port)
         console.print(f"  平均 RTT: [bold]{result['avg_ms']} ms[/bold]  ({result['success']}/{result['success']+result['fail']} 成功)")
         console.print(f"  样本: {result['samples']}")
         console.print("  [dim]按任意键继续...[/dim]")
         _read_key_or_wait(10.0)
-        dashboard.update(status_msg=f"RTT: {result['avg_ms']} ms ({result['success']}/{result['success']+result['fail']})")
+        dashboard.update(status_msg=_snarky(f"RTT: {result['avg_ms']} ms ({result['success']}/{result['success']+result['fail']})"))
     except Exception as e:
         dashboard.update(status_msg=f"RTT 探测失败: {e}")
-    if dashboard._live:
-        dashboard._live.start()
+    finally:
+        if dashboard._live:
+            dashboard._live.start()
 
 
 def _handle_probe_throughput(dashboard: Dashboard, api: LagDriveAPI) -> None:
@@ -382,13 +428,14 @@ def _handle_probe_throughput(dashboard: Dashboard, api: LagDriveAPI) -> None:
         else:
             console.print(f"  带宽: [bold]{result['mbps']} Mbps[/bold]  ({result['bytes_downloaded']:,} bytes)")
             console.print(f"  耗时: {result['elapsed_s']} s")
-            dashboard.update(status_msg=f"带宽: {result['mbps']} Mbps")
+            dashboard.update(status_msg=_snarky(f"带宽: {result['mbps']} Mbps"))
         console.print("  [dim]按任意键继续...[/dim]")
         _read_key_or_wait(10.0)
     except Exception as e:
         dashboard.update(status_msg=f"吞吐量测试失败: {e}")
-    if dashboard._live:
-        dashboard._live.start()
+    finally:
+        if dashboard._live:
+            dashboard._live.start()
 
 
 def _handle_probe_all(dashboard: Dashboard, api: LagDriveAPI) -> None:
@@ -397,8 +444,8 @@ def _handle_probe_all(dashboard: Dashboard, api: LagDriveAPI) -> None:
         dashboard._live.stop()
     console = Console()
     try:
-        target = api._config.target
-        port = api._config.port
+        target = api.target
+        port = api.port
         console.print(f"\n[bold]完整诊断 → {target}:{port}[/bold]\n")
         console.print("[1/3] RTT 探测...")
         rtt = LagDriveAPI.probe_rtt(target, port)
@@ -414,11 +461,12 @@ def _handle_probe_all(dashboard: Dashboard, api: LagDriveAPI) -> None:
         console.print(f"\n  [dim italic]{quote}[/dim italic]")
         console.print("  [dim]按任意键继续...[/dim]")
         _read_key_or_wait(15.0)
-        dashboard.update(status_msg=f"RTT: {rtt['avg_ms']}ms | 带宽: {mbps}Mbps | 容量: {bdp['capacity_human']}")
+        dashboard.update(status_msg=_snarky(f"RTT: {rtt['avg_ms']}ms | 带宽: {mbps}Mbps | 容量: {bdp['capacity_human']}"))
     except Exception as e:
         dashboard.update(status_msg=f"诊断失败: {e}")
-    if dashboard._live:
-        dashboard._live.start()
+    finally:
+        if dashboard._live:
+            dashboard._live.start()
 
 
 def _handle_bdp(dashboard: Dashboard, api: LagDriveAPI) -> None:
@@ -435,11 +483,12 @@ def _handle_bdp(dashboard: Dashboard, api: LagDriveAPI) -> None:
         console.print(f"\n  虚拟容量: [bold]{bdp['capacity_human']}[/bold]  ({bdp['capacity_bytes']:.0f} bytes)")
         console.print("  [dim]按任意键继续...[/dim]")
         _read_key_or_wait(10.0)
-        dashboard.update(status_msg=f"BDP: {bdp['capacity_human']}")
+        dashboard.update(status_msg=_snarky(f"BDP: {bdp['capacity_human']}"))
     except (ValueError, EOFError, KeyboardInterrupt):
-        dashboard.update(status_msg="已取消")
-    if dashboard._live:
-        dashboard._live.start()
+        dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
+    finally:
+        if dashboard._live:
+            dashboard._live.start()
 
 
 def _read_key_or_wait(timeout: float) -> None:
@@ -478,9 +527,10 @@ def _run_dashboard(target: str, port: int, probe_interval: float,
             m.total_uploaded = snap["total_uploaded"]
             m.probe_count = snap["probe_count"]
             m.fail_count = snap["fail_count"]
+            grid_data = snap.get("grid", [])
             dashboard.update(
                 metrics=m,
-                grid=api._monitor.grid,
+                grid=grid_data,
                 quote=snap["quote"],
                 storage_state=snap.get("storage"),
             )

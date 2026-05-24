@@ -59,42 +59,37 @@ section("1. 模块导入 & 基础结构")
 
 try:
     from lagdrive import __version__
-    check(__version__ == "1.0.0", f"版本号 = {__version__}")
+    check(__version__ == "1.1.0", f"版本号 = {__version__}")
 except Exception as e:
     check(False, f"导入 lagdrive 失败: {e}")
 
 try:
     from lagdrive.api import LagDriveAPI
-    ok("LagDriveAPI 导入成功")
-    passed += 1
+    check(True, "LagDriveAPI 导入成功")
 except Exception as e:
     check(False, f"LagDriveAPI 导入失败: {e}")
 
 try:
     from lagdrive.models import CellState, GridCell, NetworkMetrics
-    ok("models 导入成功")
-    passed += 1
+    check(True, "models 导入成功")
 except Exception as e:
     check(False, f"models 导入失败: {e}")
 
 try:
     from lagdrive.monitor import Monitor, MonitorConfig
-    ok("monitor 导入成功")
-    passed += 1
+    check(True, "monitor 导入成功")
 except Exception as e:
     check(False, f"monitor 导入失败: {e}")
 
 try:
     from lagdrive.dashboard import Dashboard
-    ok("dashboard 导入成功")
-    passed += 1
+    check(True, "dashboard 导入成功")
 except Exception as e:
     check(False, f"dashboard 导入失败: {e}")
 
 try:
     from lagdrive.quotes import select_quote
-    ok("quotes 导入成功")
-    passed += 1
+    check(True, "quotes 导入成功")
 except Exception as e:
     check(False, f"quotes 导入失败: {e}")
 
@@ -256,6 +251,16 @@ grid = api.grid()
 check(len(grid) == 10, "api.grid() 返回 10 行")
 check(all(isinstance(c, str) for row in grid for c in row), "grid 单元格为字符串")
 
+# Snapshot includes grid
+check("grid" in snap, "snapshot 包含 grid 字段")
+if "grid" in snap:
+    check(len(snap["grid"]) == 10, "snapshot.grid 行数 = 10")
+
+# Public API properties
+check(api.storage_enabled is False, "api.storage_enabled = False (未启用)")
+check(api.target == "1.1.1.1", "api.target = '1.1.1.1'")
+check(api.port == 80, "api.port = 80")
+
 
 # ============================================================
 # 7. Dashboard 初始化 (无网络)
@@ -274,10 +279,9 @@ check(Dashboard._format_bytes(1048576) == ("1.0", "MB"), "format_bytes(1MB) = '1
 check(Dashboard._format_bytes(1073741824) == ("1.0", "GB"), "format_bytes(1GB) = '1.0 GB'")
 
 # Test rtt_color
-check("good" in Dashboard._rtt_color(30) or Dashboard._rtt_color(30) != "dim",
-      "RTT < 50ms → good color")
-check("bad" in Dashboard._rtt_color(1000) or Dashboard._rtt_color(1000) != "dim",
-      "RTT > 500ms → bad color")
+from lagdrive.dashboard import STYLES
+check(Dashboard._rtt_color(30) == STYLES["stat_good"], "RTT < 50ms → stat_good")
+check(Dashboard._rtt_color(1000) == STYLES["stat_bad"], "RTT > 500ms → stat_bad")
 
 
 # ============================================================
@@ -292,8 +296,7 @@ if not skip_network:
     info("RTT 探测 → 1.1.1.1:80 ...")
     rtt_result = LagDriveAPI.probe_rtt("1.1.1.1", 80, count=3, timeout=5.0)
     if rtt_result["success"] > 0:
-        ok(f"RTT = {rtt_result['avg_ms']} ms  ({rtt_result['success']}/3 成功)")
-        passed += 1
+        check(True, f"RTT = {rtt_result['avg_ms']} ms  ({rtt_result['success']}/3 成功)")
     else:
         info("RTT 探测失败 (可能是网络限制, 跳过)")
         info("使用 --quick 跳过网络测试")
@@ -301,8 +304,7 @@ if not skip_network:
     info("RTT 探测 → 8.8.8.8:53 ...")
     rtt_result2 = LagDriveAPI.probe_rtt("8.8.8.8", 53, count=3, timeout=5.0)
     if rtt_result2["success"] > 0:
-        ok(f"RTT = {rtt_result2['avg_ms']} ms  ({rtt_result2['success']}/3 成功)")
-        passed += 1
+        check(True, f"RTT = {rtt_result2['avg_ms']} ms  ({rtt_result2['success']}/3 成功)")
     else:
         info("RTT 探测失败 (可能是网络限制, 跳过)")
 
@@ -310,8 +312,7 @@ if not skip_network:
         info("吞吐量测试 (可能需要 10-30 秒)...")
         tp_result = LagDriveAPI.probe_throughput(test_size=5_000_000)
         if "error" not in tp_result:
-            ok(f"吞吐量 = {tp_result['mbps']} Mbps  ({tp_result['bytes_downloaded']:,} bytes)")
-            passed += 1
+            check(True, f"吞吐量 = {tp_result['mbps']} Mbps  ({tp_result['bytes_downloaded']:,} bytes)")
         else:
             info(f"吞吐量测试失败: {tp_result.get('error', 'unknown')}")
 
@@ -321,21 +322,28 @@ if not skip_network:
 # ============================================================
 section("9. Monitor 生命周期测试")
 
-api2 = LagDriveAPI(target="1.1.1.1", port=80, probe_interval=1.0)
-check(not api2.running, "启动前 running = False")
+if skip_network:
+    info("--quick: 跳过 Monitor 生命周期测试 (需要网络)")
+else:
+    api2 = LagDriveAPI(target="1.1.1.1", port=80, probe_interval=1.0)
+    check(not api2.running, "启动前 running = False")
 
-api2.start()
-time.sleep(0.5)
-check(api2.running, "启动后 running = True")
+    api2.start()
+    deadline = time.monotonic() + 5.0
+    while not api2.running and time.monotonic() < deadline:
+        time.sleep(0.1)
+    check(api2.running, "启动后 running = True")
 
-time.sleep(10.0)
-snap2 = api2.snapshot()
-check(snap2["probe_count"] > 0, f"探测计数 = {snap2['probe_count']} (> 0)")
-info(f"RTT: {snap2['rtt_current']:.1f} ms, Loss: {snap2['loss_rate']*100:.1f}%")
+    time.sleep(10.0)
+    snap2 = api2.snapshot()
+    check(snap2["probe_count"] > 0, f"探测计数 = {snap2['probe_count']} (> 0)")
+    info(f"RTT: {snap2['rtt_current']:.1f} ms, Loss: {snap2['loss_rate']*100:.1f}%")
 
-api2.stop()
-time.sleep(0.5)
-check(not api2.running, "停止后 running = False")
+    api2.stop()
+    deadline = time.monotonic() + 5.0
+    while api2.running and time.monotonic() < deadline:
+        time.sleep(0.1)
+    check(not api2.running, "停止后 running = False")
 
 
 # ============================================================
@@ -363,12 +371,12 @@ class MockSocket:
 mock = MockSocket(frame)
 result = LagDriveProtocol.decode_frame(mock)
 check(result is not None, "decode_frame 返回非 None")
-if result:
+if result is not None:
     ftype, body = result
     check(ftype == TYPE_WRITE, f"帧类型 = WRITE (0x{ftype:02x})")
     decoded = LagDriveProtocol.decode_block_body(body)
     check(decoded is not None, "decode_block_body 成功")
-    if decoded:
+    if decoded is not None:
         bid, off, data = decoded
         check(bid == 42, f"block_id = {bid} (期望 42)")
         check(off == 100, f"offset = {off} (期望 100)")
@@ -466,39 +474,40 @@ time.sleep(0.2)
 try:
     # Connect and send WRITE frame
     sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    sock.connect(("127.0.0.1", actual_port))
-    write_frame = LagDriveProtocol.encode_write(block_id=1, offset=0, data=b"relay test")
-    sock.sendall(write_frame)
+    try:
+        sock.connect(("127.0.0.1", actual_port))
+        write_frame = LagDriveProtocol.encode_write(block_id=1, offset=0, data=b"relay test")
+        sock.sendall(write_frame)
 
-    # Read ECHO frame
-    sock.settimeout(3.0)
-    echo_result = LagDriveProtocol.decode_frame(sock)
-    check(echo_result is not None, "收到 ECHO 帧")
-    if echo_result:
-        etype, ebody = echo_result
-        check(etype == TYPE_ECHO, f"ECHO 类型正确 (0x{etype:02x})")
-        decoded = LagDriveProtocol.decode_block_body(ebody)
-        if decoded:
-            bid, off, data = decoded
-            check(bid == 1, f"block_id = {bid}")
-            check(data == b"relay test", f"数据 = {data!r}")
-
-    # Send multiple frames
-    for i in range(5):
-        f = LagDriveProtocol.encode_write(block_id=i + 10, offset=i * 100, data=f"frame-{i}".encode())
-        sock.sendall(f)
-    for i in range(5):
+        # Read ECHO frame
         sock.settimeout(3.0)
-        r = LagDriveProtocol.decode_frame(sock)
-        check(r is not None and r[0] == TYPE_ECHO, f"多帧 echo #{i+1} 成功")
+        echo_result = LagDriveProtocol.decode_frame(sock)
+        check(echo_result is not None, "收到 ECHO 帧")
+        if echo_result is not None:
+            etype, ebody = echo_result
+            check(etype == TYPE_ECHO, f"ECHO 类型正确 (0x{etype:02x})")
+            decoded = LagDriveProtocol.decode_block_body(ebody)
+            if decoded is not None:
+                bid, off, data = decoded
+                check(bid == 1, f"block_id = {bid}")
+                check(data == b"relay test", f"数据 = {data!r}")
 
-    sock.close()
+        # Send multiple frames
+        for i in range(5):
+            f = LagDriveProtocol.encode_write(block_id=i + 10, offset=i * 100, data=f"frame-{i}".encode())
+            sock.sendall(f)
+        for i in range(5):
+            sock.settimeout(3.0)
+            r = LagDriveProtocol.decode_frame(sock)
+            check(r is not None and r[0] == TYPE_ECHO, f"多帧 echo #{i+1} 成功")
+    finally:
+        sock.close()
 except Exception as e:
     check(False, f"Relay 测试异常: {e}")
 
 relay.stop()
 time.sleep(0.3)
-check(True, "Relay 正常关闭")
+check(relay._server is None, "Relay 正常关闭")
 
 
 # ============================================================

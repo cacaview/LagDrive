@@ -63,6 +63,9 @@ class RingBuffer:
 
             self._evict_for_space(len(chunk))
 
+            if not self._can_fit(len(chunk)):
+                break
+
             self._blocks[block_id] = block
             self._next_id += 1
             self._write_offset += len(chunk)
@@ -141,6 +144,10 @@ class RingBuffer:
             self._evict_oldest()
         while len(self._blocks) >= self.max_blocks and self._blocks:
             self._evict_oldest()
+
+    def _can_fit(self, needed: int) -> bool:
+        """Check if a block of `needed` bytes can fit after eviction."""
+        return needed <= self.max_bytes
 
     def _evict_oldest_to_fit(self) -> None:
         """Evict oldest blocks until within capacity."""
@@ -221,6 +228,8 @@ class StorageClient:
             except OSError:
                 pass
             self._conn = None
+        if self._recv_thread and self._recv_thread.is_alive():
+            self._recv_thread.join(timeout=2.0)
 
     def write(self, data: bytes) -> dict:
         """Store data in the network ring buffer and send to relay.
@@ -240,7 +249,8 @@ class StorageClient:
             except OSError:
                 break
 
-        stats = self._ring.stats
+        with self._lock:
+            stats = self._ring.stats
         return {
             "blocks_written": sent,
             "bytes_written": sum(b.size for b in blocks),

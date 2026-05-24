@@ -10,6 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .models import CellState, GridCell, NetworkMetrics
+from .quotes import select_exit_quote
 
 # DiskGenius-inspired color palette
 STYLES = {
@@ -158,16 +159,17 @@ class Dashboard:
         for row in self._grid:
             cells = []
             for cell in row:
+                state = cell.state if isinstance(cell, GridCell) else cell
                 t = Text()
-                if cell.state == CellState.ACTIVE:
+                if state == CellState.ACTIVE or state == "active":
                     t.append(" [", "default")
                     t.append("·", STYLES["active_cell"])
                     t.append("] ", "default")
-                elif cell.state == CellState.ERROR:
+                elif state == CellState.ERROR or state == "error":
                     t.append(" [", "default")
                     t.append("!", STYLES["error_cell"])
                     t.append("] ", "default")
-                elif cell.state == CellState.STORED:
+                elif state == CellState.STORED or state == "stored":
                     t.append(" [", "default")
                     t.append("S", STYLES["stored_cell"])
                     t.append("] ", "default")
@@ -377,7 +379,7 @@ class Dashboard:
         t.append(f"  平均寻道时间:  {m.rtt_avg:.0f} ms\n", STYLES["stat_value"])
         t.append(f"  总数据传输:    {dl_str} {dl_unit}\n", STYLES["stat_value"])
         t.append(f"  丢包率:        {m.loss_rate * 100:.1f}%\n", STYLES["stat_value"])
-        t.append("\n  所有数据已清空。就像你的带宽一样——从未真正存在过。\n", "dim italic")
+        t.append(f"\n  {select_exit_quote()}\n", "dim italic")
         return Panel(t, border_style=STYLES["panel_border"])
 
     # --- Helpers ---

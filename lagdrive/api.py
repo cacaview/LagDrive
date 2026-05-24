@@ -67,6 +67,21 @@ class LagDriveAPI:
     def running(self) -> bool:
         return self._monitor._running
 
+    @property
+    def storage_enabled(self) -> bool:
+        """Whether storage is currently connected."""
+        return self._monitor._storage is not None
+
+    @property
+    def target(self) -> str:
+        """Current probe target."""
+        return self._config.target
+
+    @property
+    def port(self) -> int:
+        """Current probe port."""
+        return self._config.port
+
     # --- State access ---
 
     def snapshot(self) -> dict:
@@ -78,7 +93,11 @@ class LagDriveAPI:
         return self._monitor.get_snapshot()
 
     def metrics(self) -> NetworkMetrics:
-        """Return the raw NetworkMetrics object (read-only intent)."""
+        """Return the raw NetworkMetrics object (read-only intent).
+
+        WARNING: Not thread-safe — the object may be mutated by probe threads
+        while you read it. Use snapshot() for safe cross-thread access.
+        """
         return self._monitor.metrics
 
     def grid(self) -> list[list[str]]:
@@ -172,16 +191,17 @@ class LagDriveAPI:
         samples: list[float] = []
         fail = 0
         for _ in range(count):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(timeout)
                 t0 = time.perf_counter()
                 sock.connect((target, port))
                 elapsed = (time.perf_counter() - t0) * 1000
-                sock.close()
                 samples.append(round(elapsed, 2))
             except (socket.timeout, OSError):
                 fail += 1
+            finally:
+                sock.close()
         return {
             "target": target,
             "samples": samples,
