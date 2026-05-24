@@ -2,6 +2,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 from time import monotonic
 
+__all__ = [
+    "RAIDMode", "CellState", "GridCell", "NetworkMetrics",
+    "StorageBlock", "StorageState", "RelayHealth", "PerRelayRTT",
+]
+
+
+class RAIDMode(Enum):
+    """RAID storage mode for multi-relay configurations."""
+    NONE = "none"       # Single relay (original behavior)
+    RAID0 = "raid0"     # Striping — data split across relays, no redundancy
+    RAID1 = "raid1"     # Mirroring — every block sent to all relays
+    RAID5 = "raid5"     # Striping + distributed parity, survives 1 relay failure
+    RAID10 = "raid10"   # Mirrored pairs + striping, survives 1 per pair
+
 
 class CellState(Enum):
     """State of a virtual disk block in the cluster grid."""
@@ -87,6 +101,10 @@ class StorageBlock:
     confirmed: bool = False
     expired: bool = False
     ack_time: float = 0.0
+    is_parity: int = -1  # -1 = data block; >= 0 = parity, value = owning relay index
+    relay_targets: list[int] = field(default_factory=list)  # relay indices this block was sent to
+    send_failed: bool = False  # True if send failed to ALL target relays
+    _original_data: bytes = b''  # preserved before expiry zeroing for reconstruction
 
     @property
     def size(self) -> int:
@@ -105,3 +123,30 @@ class StorageState:
     write_count: int = 0
     read_count: int = 0
     relay_connected: bool = False
+
+
+@dataclass
+class RelayHealth:
+    """Per-relay health state for RAID monitoring."""
+    address: tuple[str, int] = ("", 0)
+    alive: bool = True
+    consecutive_failures: int = 0
+    last_failure_time: float = 0.0
+    last_success_time: float = 0.0
+    total_sends: int = 0
+    total_failures: int = 0
+
+
+@dataclass
+class PerRelayRTT:
+    """Per-relay RTT sliding window tracker."""
+    samples: list[float] = field(default_factory=list)
+    current: float = 0.0
+    avg: float = 0.0
+
+    def update(self, value: float, max_samples: int = 15) -> None:
+        self.current = value
+        self.samples.append(value)
+        if len(self.samples) > max_samples:
+            self.samples.pop(0)
+        self.avg = sum(self.samples) / len(self.samples)

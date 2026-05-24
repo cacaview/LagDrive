@@ -7,7 +7,7 @@ LagDrive — 将网络延迟模拟成虚拟硬盘的基准测试工具。
 延迟越高，链路中同时存在的比特流越多，理论"网线容量"越大。
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import argparse
 import random
@@ -106,12 +106,31 @@ def _build_parser() -> argparse.ArgumentParser:
     storage_group.add_argument("--storage", action="store_true",
                                help="启用存储模式 (需要运行中的 Relay)")
 
+    # RAID options
+    raid_group = parser.add_argument_group("RAID 多副本存储")
+    raid_group.add_argument("--raid-mode", type=str, default="none",
+                            choices=["none", "raid0", "raid1", "raid5", "raid10"],
+                            help="RAID 存储模式 (default: none)")
+    raid_group.add_argument("--relays", nargs="+", metavar="HOST:PORT",
+                            help="多个 Relay 地址 (如 127.0.0.1:9527 127.0.0.1:9528)")
+
     return parser
 
 
 def _print_json(data: dict) -> None:
     import json
     print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _parse_relays(relay_strs: list[str]) -> list[tuple[str, int]]:
+    """Parse 'host:port' strings into (host, port) tuples."""
+    relays = []
+    for s in relay_strs:
+        if ":" not in s:
+            raise ValueError(f"无效的 Relay 地址格式: {s} (应为 host:port)")
+        host, port_str = s.rsplit(":", 1)
+        relays.append((host, int(port_str)))
+    return relays
 
 
 def _cmd_probe_rtt(target: str, port: int) -> None:
@@ -193,14 +212,26 @@ def _cmd_relay(host: str, port: int) -> None:
     console.print("\n已停止。")
 
 
-def _cmd_store(relay_host: str, relay_port: int, data: str) -> None:
+def _cmd_store(relay_host: str, relay_port: int, data: str,
+               raid_mode: str = "none",
+               relays: list[tuple[str, int]] | None = None) -> None:
     """Write data to network storage."""
     console = Console()
     api = LagDriveAPI(
         target=relay_host, port=80,
-        storage_enabled=True,
         relay_host=relay_host, relay_port=relay_port,
     )
+    if relays and raid_mode != "none":
+        result = api.enable_raid_storage(relays, raid_mode)
+        if not result.get("enabled"):
+            console.print(f"[red]RAID 存储启用失败: {result.get('error')}[/red]")
+            return
+        console.print(f"  [green]RAID {raid_mode} 已启用 ({result['relays']} relays)[/green]")
+    else:
+        result = api.enable_storage(relay_host, relay_port)
+        if not result.get("enabled"):
+            console.print(f"[red]存储启用失败: {result.get('error')}[/red]")
+            return
     api.start()
     try:
         time.sleep(1.0)
@@ -215,14 +246,25 @@ def _cmd_store(relay_host: str, relay_port: int, data: str) -> None:
         api.stop()
 
 
-def _cmd_read(relay_host: str, relay_port: int, offset: int, length: int) -> None:
+def _cmd_read(relay_host: str, relay_port: int, offset: int, length: int,
+              raid_mode: str = "none",
+              relays: list[tuple[str, int]] | None = None) -> None:
     """Read data from network storage."""
     console = Console()
     api = LagDriveAPI(
         target=relay_host, port=80,
-        storage_enabled=True,
         relay_host=relay_host, relay_port=relay_port,
     )
+    if relays and raid_mode != "none":
+        result = api.enable_raid_storage(relays, raid_mode)
+        if not result.get("enabled"):
+            console.print(f"[red]RAID 存储启用失败: {result.get('error')}[/red]")
+            return
+    else:
+        result = api.enable_storage(relay_host, relay_port)
+        if not result.get("enabled"):
+            console.print(f"[red]存储启用失败: {result.get('error')}[/red]")
+            return
     api.start()
     try:
         time.sleep(1.0)
@@ -238,14 +280,22 @@ def _cmd_read(relay_host: str, relay_port: int, offset: int, length: int) -> Non
         api.stop()
 
 
-def _cmd_storage_info(relay_host: str, relay_port: int) -> None:
+def _cmd_storage_info(relay_host: str, relay_port: int,
+                      raid_mode: str = "none",
+                      relays: list[tuple[str, int]] | None = None) -> None:
     """Show storage status."""
     console = Console()
     api = LagDriveAPI(
         target=relay_host, port=80,
-        storage_enabled=True,
         relay_host=relay_host, relay_port=relay_port,
     )
+    if relays and raid_mode != "none":
+        result = api.enable_raid_storage(relays, raid_mode)
+        if not result.get("enabled"):
+            console.print(f"[red]RAID 存储启用失败: {result.get('error')}[/red]")
+            return
+    else:
+        api.enable_storage(relay_host, relay_port)
     api.start()
     try:
         time.sleep(1.0)
@@ -355,6 +405,58 @@ def _handle_clear(dashboard: Dashboard, api: LagDriveAPI) -> None:
         dashboard.update(status_msg="存储未启用，按 S 启用")
 
 
+def _handle_switch_raid(dashboard: Dashboard, api: LagDriveAPI) -> None:
+    """Switch RAID mode on-the-fly."""
+    if dashboard._live:
+        dashboard._live.stop()
+    console = Console()
+    try:
+        console.print("\n[bold cyan]RAID 模式切换[/bold cyan]")
+        console.print("  0) none  — 单 Relay (无 RAID)")
+        console.print("  1) raid0 — 条带化 (无冗余)")
+        console.print("  2) raid1 — 镜像 (全冗余)")
+        console.print("  3) raid5 — 校验 (容错 1)")
+        console.print("  4) raid10 — 镜像条带 (容错 N/2)")
+        choice = console.input("\n[bold cyan]选择模式[/bold cyan] [dim](0-4):[/dim] ").strip()
+
+        mode_map = {"0": "none", "1": "raid0", "2": "raid1", "3": "raid5", "4": "raid10"}
+        mode = mode_map.get(choice)
+        if mode is None:
+            dashboard.update(status_msg="无效选择")
+            return
+
+        relays = None
+        if mode != "none":
+            relay_input = console.input(
+                "[bold cyan]Relay 地址[/bold cyan] [dim](host:port 用空格分隔):[/dim] "
+            ).strip()
+            if not relay_input:
+                dashboard.update(status_msg="需要 Relay 地址")
+                return
+            try:
+                relays = _parse_relays(relay_input.split())
+            except ValueError as e:
+                dashboard.update(status_msg=f"地址格式错误: {e}")
+                return
+
+        console.print(f"  正在切换到 {mode}...")
+        result = api.switch_raid_mode(mode, relays)
+        if result.get("switched"):
+            msg = _snarky(f"已切换到 {result['mode']} ({result['relays']} relays)")
+            console.print(f"  [green]{msg}[/green]")
+        else:
+            msg = f"切换失败: {result.get('error', '未知错误')}"
+            console.print(f"  [red]{msg}[/red]")
+        console.print("  [dim]按任意键继续...[/dim]")
+        _read_key_or_wait(5.0)
+        dashboard.update(status_msg=msg)
+    except (EOFError, KeyboardInterrupt, ValueError):
+        dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
+    finally:
+        if dashboard._live:
+            dashboard._live.start()
+
+
 def _handle_toggle_storage(dashboard: Dashboard, api: LagDriveAPI) -> None:
     """Enable or disable storage at runtime."""
     if api.storage_enabled:
@@ -374,6 +476,31 @@ def _handle_toggle_storage(dashboard: Dashboard, api: LagDriveAPI) -> None:
         port_str = console.input("[bold cyan]Relay 端口[/bold cyan] [dim](默认 9527):[/dim] ").strip()
         host = host or "127.0.0.1"
         port = int(port_str) if port_str else 9527
+
+        mode_choice = console.input(
+            "[bold cyan]RAID 模式[/bold cyan] [dim](0=none, 1=raid0, 2=raid1, 3=raid5, 4=raid10, 默认 0):[/dim] "
+        ).strip()
+        raid_map = {"0": "none", "1": "raid0", "2": "raid1", "3": "raid5", "4": "raid10", "": "none"}
+        raid_mode = raid_map.get(mode_choice, "none")
+
+        if raid_mode != "none":
+            extra_input = console.input(
+                "[bold cyan]额外 Relay 地址[/bold cyan] [dim](host:port 用空格分隔):[/dim] "
+            ).strip()
+            if extra_input:
+                all_relays = [(host, port)] + _parse_relays(extra_input.split())
+                console.print(f"  正在连接 RAID {raid_mode} ({len(all_relays)} relays)...")
+                result = api.enable_raid_storage(all_relays, raid_mode)
+                if result.get("enabled"):
+                    console.print(f"  [green]RAID {raid_mode} 已启用 ({result['relays']} relays)[/green]")
+                    msg = _snarky(f"RAID {raid_mode} 已连接 ({result['relays']} relays)")
+                else:
+                    console.print(f"  [red]连接失败: {result.get('error')}[/red]")
+                    msg = f"连接失败: {result.get('error')}"
+                console.print("  [dim]按任意键继续...[/dim]")
+                _read_key_or_wait(5.0)
+                dashboard.update(status_msg=msg)
+                return
         console.print(f"  正在连接 {host}:{port}...")
         result = api.enable_storage(host, port)
         if result.get("enabled"):
@@ -502,13 +629,17 @@ def _read_key_or_wait(timeout: float) -> None:
 
 def _run_dashboard(target: str, port: int, probe_interval: float,
                    relay_host: str = "127.0.0.1", relay_port: int = 9527,
-                   storage_enabled: bool = False) -> None:
+                   storage_enabled: bool = False,
+                   raid_mode: str = "none",
+                   relays: list[tuple[str, int]] | None = None) -> None:
     console = Console()
     dashboard = Dashboard()
     api = LagDriveAPI(
         target=target, port=port, probe_interval=probe_interval,
         relay_host=relay_host, relay_port=relay_port,
         storage_enabled=storage_enabled,
+        raid_mode=raid_mode,
+        relays=relays,
     )
 
     def poll_loop():
@@ -557,6 +688,8 @@ def _run_dashboard(target: str, port: int, probe_interval: float,
                     _handle_clear(dashboard, api)
                 elif key == 's':
                     _handle_toggle_storage(dashboard, api)
+                elif key == 'm':
+                    _handle_switch_raid(dashboard, api)
                 elif key == 'p':
                     _handle_probe_rtt(dashboard, api)
                 elif key == 't':
@@ -577,18 +710,30 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
+    # Parse RAID relay list if provided
+    parsed_relays = None
+    if args.relays:
+        try:
+            parsed_relays = _parse_relays(args.relays)
+        except ValueError as e:
+            print(f"[错误] {e}", file=sys.stderr)
+            sys.exit(1)
+
     # Route to storage commands
     if args.relay:
         _cmd_relay(args.relay_host, args.relay_port)
         return
     if args.store:
-        _cmd_store(args.relay_host, args.relay_port, args.store)
+        _cmd_store(args.relay_host, args.relay_port, args.store,
+                   raid_mode=args.raid_mode, relays=parsed_relays)
         return
     if args.read:
-        _cmd_read(args.relay_host, args.relay_port, args.read[0], args.read[1])
+        _cmd_read(args.relay_host, args.relay_port, args.read[0], args.read[1],
+                  raid_mode=args.raid_mode, relays=parsed_relays)
         return
     if args.storage_info:
-        _cmd_storage_info(args.relay_host, args.relay_port)
+        _cmd_storage_info(args.relay_host, args.relay_port,
+                          raid_mode=args.raid_mode, relays=parsed_relays)
         return
 
     # Route to API debug commands
@@ -609,9 +754,12 @@ def main() -> None:
         return
 
     # Default: full dashboard
+    storage_flag = args.storage or args.raid_mode != "none"
     _run_dashboard(args.target, args.port, args.probe_interval,
                    relay_host=args.relay_host, relay_port=args.relay_port,
-                   storage_enabled=args.storage)
+                   storage_enabled=storage_flag,
+                   raid_mode=args.raid_mode,
+                   relays=parsed_relays)
 
 
 if __name__ == "__main__":

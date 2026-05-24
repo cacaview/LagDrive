@@ -131,6 +131,54 @@ STORAGE_CONFIRMED: list[str] = [
     "数据安然无恙。看来你的路由器今天没有搞破坏。",
 ]
 
+# Category: RAID storage events
+RAID_STRIPED: list[str] = [
+    "数据已被拆散到多个网络管道中。团结就是力量，分散就是带宽。",
+    "RAID 0 生效——数据碎片化存储。坏消息：一块 Relay 挂了你就哭吧。",
+    "条带化写入完成。你的数据现在是分布式难民。",
+    "数据分散到了多条网线中。这叫策略性分散投资。",
+    "RAID 0: 没有冗余，只有信仰。写入成功。",
+]
+
+RAID_MIRRORED: list[str] = [
+    "数据已复制到所有 Relay。浪费？不，这叫安全感。",
+    "RAID 1 生效——每份数据都有双胞胎。冗余到令人感动。",
+    "镜像写入完成。即使世界末日，至少你的数据有备份。",
+    "数据已经克隆到每个 Relay 上了。安全第一，带宽第二。",
+    "RAID 1: 用双倍的存储换来零倍的安心。写入完成。",
+]
+
+RAID_PARITY: list[str] = [
+    "RAID 5 生效——数据加上校验。坏一块 Relay 也能活。大概。",
+    "奇偶校验写入完成。数学拯救了你的数据（这一次）。",
+    "XOR 校验已写入。数据冗余但不浪费——优雅的浪费。",
+    "RAID 5: 用 N-1 的容量换一个容错。性价比拉满。",
+    "分布式校验就绪。一块 Relay 牺牲了，其他会替它完成使命。",
+]
+
+RAID_TEN: list[str] = [
+    "RAID 10 生效——镜像 + 条带。这是企业级的网络延迟存储。",
+    "RAID 10: 又快又安全。在网络延迟存储的世界里，这就是豪车。",
+    "镜像条带化写入完成。你的数据既有备份又有速度。",
+    "RAID 10 配置已就绪。恭喜，你的虚拟硬盘有了 VIP 待遇。",
+]
+
+# Category: RAID degraded mode
+RAID_DEGRADED: list[str] = [
+    "检测到 Relay 离线。系统进入降级模式。你的数据正在用数学续命。",
+    "一块 Relay 牺牲了。XOR 校验接管一切。数学：1，硬件：0。",
+    "RAID 降级运行中。性能可能下降，但数据仍在。暂时。",
+    "Relay 断开连接。系统切换到降级模式，就像你的人生。",
+    "检测到硬件故障。校验块正在加班。",
+]
+
+RAID_REBUILT: list[str] = [
+    "Relay 重新上线！降级模式解除。数据松了一口气。",
+    "所有 Relay 恢复正常。冗余已重建。你的硬盘又能吹牛了。",
+    "故障 Relay 回来了。系统从降级模式毕业。",
+]
+
+
 # Category: Exit messages
 EXIT_QUOTES: list[str] = [
     "所有数据已清空。就像你的带宽一样——从未真正存在过。",
@@ -158,7 +206,7 @@ def select_quote(
 ) -> str:
     """Select a contextually appropriate sarcastic quote.
 
-    Priority: storage events > loss > RTT extremes > traffic > throughput > capacity > neutral
+    Priority: storage events (incl. RAID) > loss > RTT extremes > traffic > throughput > capacity > neutral
     """
     # Storage events take top priority
     if storage_event == "write":
@@ -167,6 +215,22 @@ def select_quote(
         return random.choice(STORAGE_LOST)
     if storage_event == "confirmed":
         return random.choice(STORAGE_CONFIRMED)
+
+    # RAID storage events
+    if storage_event == "raid0":
+        return random.choice(RAID_STRIPED)
+    if storage_event == "raid1":
+        return random.choice(RAID_MIRRORED)
+    if storage_event == "raid5":
+        return random.choice(RAID_PARITY)
+    if storage_event == "raid10":
+        return random.choice(RAID_TEN)
+
+    # RAID degraded / rebuilt
+    if storage_event == "raid_degraded":
+        return random.choice(RAID_DEGRADED)
+    if storage_event == "raid_rebuilt":
+        return random.choice(RAID_REBUILT)
 
     # Network down — all probes failed
     if rtt_avg <= 0 and loss_rate >= 0.99:

@@ -20,7 +20,7 @@ import socket
 import time
 from dataclasses import asdict
 
-from .models import NetworkMetrics
+from .models import NetworkMetrics, RAIDMode
 from .monitor import Monitor, MonitorConfig
 from .quotes import select_quote
 
@@ -41,7 +41,11 @@ class LagDriveAPI:
         relay_host: str = "127.0.0.1",
         relay_port: int = 9527,
         storage_enabled: bool = False,
+        raid_mode: str | RAIDMode = RAIDMode.NONE,
+        relays: list[tuple[str, int]] | None = None,
     ) -> None:
+        if isinstance(raid_mode, str):
+            raid_mode = RAIDMode(raid_mode) if raid_mode != "none" else RAIDMode.NONE
         self._config = MonitorConfig(
             target=target,
             port=port,
@@ -50,6 +54,8 @@ class LagDriveAPI:
             relay_host=relay_host,
             relay_port=relay_port,
             storage_enabled=storage_enabled,
+            raid_mode=raid_mode,
+            relays=relays,
         )
         self._monitor = Monitor(self._config)
 
@@ -119,29 +125,33 @@ class LagDriveAPI:
         Returns:
             {"blocks_written": int, "bytes_written": int, "capacity_remaining": int}
         """
-        if self._monitor._storage is None:
+        storage = self._monitor._storage
+        if storage is None:
             return {"blocks_written": 0, "bytes_written": 0, "error": "storage not enabled"}
-        return self._monitor._storage.write(data)
+        return storage.write(data)
 
     def read(self, offset: int, length: int) -> bytes:
         """Read stored data from the network ring buffer."""
-        if self._monitor._storage is None:
+        storage = self._monitor._storage
+        if storage is None:
             return b''
-        return self._monitor._storage.read(offset, length)
+        return storage.read(offset, length)
 
     def storage_info(self) -> dict | None:
         """Current storage status. Returns None if storage not enabled."""
-        if self._monitor._storage is None:
+        storage = self._monitor._storage
+        if storage is None:
             return None
-        return self._monitor._storage.stats
+        return storage.stats
 
     def clear_storage(self) -> dict:
         """Clear all stored blocks."""
-        if self._monitor._storage is None:
+        storage = self._monitor._storage
+        if storage is None:
             return {"cleared": False, "error": "storage not enabled"}
-        with self._monitor._storage._lock:
-            stats = self._monitor._storage._ring.stats
-            self._monitor._storage._ring.clear()
+        with storage._lock:
+            stats = storage._ring.stats
+            storage._ring.clear()
         return {"cleared": True, "blocks_cleared": stats["total_blocks"]}
 
     def enable_storage(self, relay_host: str = "127.0.0.1", relay_port: int = 9527) -> dict:
@@ -165,6 +175,78 @@ class LagDriveAPI:
         self._monitor._storage.disconnect()
         self._monitor._storage = None
         return {"disabled": True}
+
+    def enable_raid_storage(
+        self,
+        relays: list[tuple[str, int]],
+        mode: str | RAIDMode = "raid0",
+    ) -> dict:
+        """Enable RAID storage across multiple relays.
+
+        Args:
+            relays: List of (host, port) tuples for each relay.
+            mode: RAID level — "raid0", "raid1", "raid5", or "raid10".
+
+        Returns:
+            {"enabled": True, "mode": str, "relays": int} on success.
+        """
+        if self._monitor._storage is not None:
+            return {"enabled": False, "error": "storage already enabled"}
+        if isinstance(mode, str):
+            mode = RAIDMode(mode)
+        from .raid import RAIDStorageClient
+        from .storage import RingBuffer
+        ring = RingBuffer(max_bytes=1_000_000, block_size=self._config.block_size)
+        try:
+            client = RAIDStorageClient(
+                relays=relays, mode=mode, ring=ring,
+                block_size=self._config.block_size,
+            )
+            client.connect()
+            self._monitor._storage = client
+            self._config.raid_mode = mode
+            self._config.relays = relays
+            return {
+                "enabled": True,
+                "mode": mode.value,
+                "relays": len(relays),
+            }
+        except Exception as e:
+            return {"enabled": False, "error": str(e)}
+
+    def switch_raid_mode(
+        self,
+        mode: str | RAIDMode,
+        relays: list[tuple[str, int]] | None = None,
+    ) -> dict:
+        """Switch RAID mode at runtime. Disconnects current storage and reconnects."""
+        if isinstance(mode, str):
+            mode = RAIDMode(mode) if mode != "none" else RAIDMode.NONE
+
+        if self._monitor._storage is not None:
+            self._monitor._storage.disconnect()
+            self._monitor._storage = None
+
+        self._config.raid_mode = mode
+        self._config.relays = relays
+
+        if mode == RAIDMode.NONE:
+            if relays:
+                host, port = relays[0]
+                result = self.enable_storage(host, port)
+                return {"switched": result.get("enabled", False), "mode": "none", "relays": 1}
+            return {"switched": True, "mode": "none", "relays": 0}
+
+        if not relays or len(relays) < 2:
+            return {"switched": False, "error": "RAID requires at least 2 relays"}
+
+        result = self.enable_raid_storage(relays, mode)
+        return {
+            "switched": result.get("enabled", False),
+            "mode": mode.value,
+            "relays": len(relays),
+            "error": result.get("error"),
+        }
 
     # --- One-shot probes (no background thread) ---
 

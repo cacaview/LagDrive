@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .models import CellState, GridCell, NetworkMetrics
+from .models import CellState, GridCell, NetworkMetrics, RAIDMode
 
 
 @dataclass
@@ -21,11 +21,14 @@ class MonitorConfig:
     concurrent_probes: int = 3
     grid_rows: int = 10
     grid_cols: int = 10
-    # Storage
+    # Storage (single relay — backward compatible)
     relay_host: str = "127.0.0.1"
     relay_port: int = 9527
     storage_enabled: bool = False
     block_size: int = 65536
+    # RAID (multi-relay)
+    raid_mode: RAIDMode = RAIDMode.NONE
+    relays: list[tuple[str, int]] | None = None
 
 
 class Monitor:
@@ -66,12 +69,26 @@ class Monitor:
         if self._running:
             return
         if self.config.storage_enabled:
-            from .storage import StorageClient, RingBuffer
-            ring = RingBuffer(max_bytes=1_000_000, block_size=self.config.block_size)
-            self._storage = StorageClient(
-                self.config.relay_host, self.config.relay_port, ring=ring,
-            )
-            self._storage.connect()
+            if (self.config.raid_mode != RAIDMode.NONE
+                    and self.config.relays
+                    and len(self.config.relays) >= 2):
+                from .raid import RAIDStorageClient
+                from .storage import RingBuffer
+                ring = RingBuffer(max_bytes=1_000_000, block_size=self.config.block_size)
+                self._storage = RAIDStorageClient(
+                    relays=self.config.relays,
+                    mode=self.config.raid_mode,
+                    ring=ring,
+                    block_size=self.config.block_size,
+                )
+                self._storage.connect()
+            else:
+                from .storage import StorageClient, RingBuffer
+                ring = RingBuffer(max_bytes=1_000_000, block_size=self.config.block_size)
+                self._storage = StorageClient(
+                    self.config.relay_host, self.config.relay_port, ring=ring,
+                )
+                self._storage.connect()
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -188,14 +205,37 @@ class Monitor:
                     self.metrics.total_downloaded += bytes_down
                     self.metrics.total_uploaded += 200
                     self.metrics.update_throughput(mbps)
-        except Exception as e:
+        except (OSError, socket.timeout) as e:
             import sys
             print(f"[LagDrive] throughput probe failed: {e}", file=sys.stderr)
 
     # --- Capacity calculation ---
 
     def _calculate_capacity(self) -> None:
-        self.metrics.capacity = self.metrics.bdp
+        base = self.metrics.bdp
+        if self._storage is not None and self.config.relays:
+            self.metrics.capacity = self._raid_capacity(base)
+        else:
+            self.metrics.capacity = base
+
+    def _raid_capacity(self, base_bdp: float) -> float:
+        """Scale BDP capacity according to RAID mode."""
+        n = len(self.config.relays)
+        mode = self.config.raid_mode
+        storage = self._storage
+        if storage is not None and hasattr(storage, '_relay_health'):
+            alive = sum(1 for h in storage._relay_health if h.alive)
+        else:
+            alive = n
+        if mode == RAIDMode.RAID0:
+            return base_bdp * alive
+        if mode == RAIDMode.RAID1:
+            return base_bdp
+        if mode == RAIDMode.RAID5:
+            return base_bdp * max(alive - 1, 0)
+        if mode == RAIDMode.RAID10:
+            return base_bdp * (alive // 2)
+        return base_bdp
 
     # --- Storage tick ---
 
@@ -285,6 +325,15 @@ class Monitor:
         if now - self._last_quote_time < self._quote_interval:
             return
         self._last_quote_time = now
+
+        storage_event = None
+        storage = self._storage
+        if storage is not None and hasattr(storage, '_relay_health'):
+            alive = sum(1 for h in storage._relay_health if h.alive)
+            total = len(storage._relay_health)
+            if 0 < alive < total:
+                storage_event = "raid_degraded"
+
         from .quotes import select_quote
         quote = select_quote(
             self.metrics.rtt_avg,
@@ -292,6 +341,7 @@ class Monitor:
             self.metrics.total_downloaded,
             self.metrics.throughput_avg,
             self.metrics.capacity,
+            storage_event=storage_event,
         )
         self._last_quote = quote
         if self.on_quote:

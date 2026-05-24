@@ -38,8 +38,13 @@ class RingBuffer:
         self._read_count = 0
         self._lost_bytes = 0
 
-    def write(self, data: bytes) -> list[StorageBlock]:
+    def write(self, data: bytes, is_parity: int = -1) -> list[StorageBlock]:
         """Split data into blocks and store in the ring buffer.
+
+        Args:
+            data: Raw bytes to store.
+            is_parity: -1 for data blocks; >= 0 for parity blocks
+                       (value = owning relay index for RAID 5).
 
         Returns list of blocks that need to be sent to the relay.
         """
@@ -59,6 +64,7 @@ class RingBuffer:
                 data=chunk,
                 offset=offset,
                 send_time=now,
+                is_parity=is_parity,
             )
 
             self._evict_for_space(len(chunk))
@@ -78,13 +84,14 @@ class RingBuffer:
         """Read data from the ring buffer at the given offset.
 
         Returns actual data for live blocks, zero bytes for expired/missing ranges.
+        Parity blocks (RAID 5) are excluded — they hold XOR, not user data.
         """
         self._read_count += 1
         result = bytearray(length)
         end = offset + length
 
         for block in self._blocks.values():
-            if block.expired:
+            if block.expired or block.is_parity >= 0:
                 continue
             block_start = block.offset
             block_end = block_start + block.size
@@ -109,27 +116,47 @@ class RingBuffer:
             block.ack_time = monotonic()
         return True
 
-    def expire_stale_blocks(self, current_rtt_ms: float) -> int:
+    def expire_stale_blocks(
+        self,
+        current_rtt_ms: float,
+        relay_rtt_map: dict[int, float] | None = None,
+    ) -> int:
         """Check and expire blocks that exceeded their TTL.
 
         TTL = max(rtt_ms * 2 * 1.5 / 1000, 0.5), capped at 30s.
+        When relay_rtt_map is provided, per-relay RTT is used for blocks
+        that have relay_targets set; otherwise falls back to global RTT.
+
         Returns count of newly expired blocks.
         """
-        if current_rtt_ms <= 0:
+        if current_rtt_ms <= 0 and not relay_rtt_map:
             return 0
 
-        ttl = max(current_rtt_ms * 2.0 * 1.5 / 1000.0, 0.5)
-        ttl = min(ttl, 30.0)
         now = monotonic()
         expired = 0
 
         for block in self._blocks.values():
-            if not block.confirmed and not block.expired:
-                if now - block.send_time > ttl:
-                    block.expired = True
-                    self._lost_bytes += block.size
-                    block.data = b'\x00' * block.size
-                    expired += 1
+            if block.confirmed or block.expired:
+                continue
+
+            block_rtt = current_rtt_ms
+            if relay_rtt_map and block.relay_targets:
+                primary = block.relay_targets[0]
+                if primary in relay_rtt_map and relay_rtt_map[primary] > 0:
+                    block_rtt = relay_rtt_map[primary]
+
+            if block_rtt <= 0:
+                continue
+
+            ttl = max(block_rtt * 2.0 * 1.5 / 1000.0, 0.5)
+            ttl = min(ttl, 30.0)
+
+            if now - block.send_time > ttl:
+                block.expired = True
+                self._lost_bytes += block.size
+                block._original_data = block.data  # preserve for reconstruction
+                block.data = b'\x00' * block.size
+                expired += 1
 
         return expired
 
@@ -160,7 +187,7 @@ class RingBuffer:
             return
         oldest_id = min(self._blocks)
         block = self._blocks.pop(oldest_id)
-        if not block.confirmed:
+        if not block.confirmed and block.is_parity < 0:
             self._lost_bytes += block.size
 
     def _used_bytes(self) -> int:
@@ -212,8 +239,13 @@ class StorageClient:
         if self._connected:
             return
         self._conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._conn.settimeout(5.0)
-        self._conn.connect((self._host, self._port))
+        try:
+            self._conn.settimeout(5.0)
+            self._conn.connect((self._host, self._port))
+        except OSError:
+            self._conn.close()
+            self._conn = None
+            raise
         self._conn.settimeout(None)
         self._connected = True
         self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
@@ -238,11 +270,12 @@ class StorageClient:
         """
         with self._lock:
             blocks = self._ring.write(data)
+            snapshots = [(b.block_id, b.offset, bytes(b.data)) for b in blocks]
 
         sent = 0
-        for block in blocks:
+        for bid, offset, blk_data in snapshots:
             try:
-                frame = LagDriveProtocol.encode_write(block.block_id, block.offset, block.data)
+                frame = LagDriveProtocol.encode_write(bid, offset, blk_data)
                 if self._conn:
                     self._conn.sendall(frame)
                 sent += 1
@@ -253,7 +286,7 @@ class StorageClient:
             stats = self._ring.stats
         return {
             "blocks_written": sent,
-            "bytes_written": sum(b.size for b in blocks),
+            "bytes_written": sum(len(d) for _, _, d in snapshots),
             "capacity_remaining": stats["capacity_bytes"] - stats["used_bytes"],
         }
 
@@ -261,6 +294,21 @@ class StorageClient:
         """Read stored data from the local ring buffer."""
         with self._lock:
             return self._ring.read(offset, length)
+
+    def send_block(self, block: StorageBlock) -> bool:
+        """Send a single block to the relay without ring buffer involvement.
+
+        Used by RAIDStorageClient to distribute blocks across relays.
+        Returns True on success.
+        """
+        try:
+            frame = LagDriveProtocol.encode_write(block.block_id, block.offset, block.data)
+            if self._conn:
+                self._conn.sendall(frame)
+            return True
+        except OSError:
+            self._connected = False  # propagate failure state immediately
+            return False
 
     def update_metrics(self, rtt_ms: float, capacity_bytes: float) -> None:
         """Called by Monitor to update TTL base and buffer capacity."""

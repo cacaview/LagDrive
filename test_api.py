@@ -59,7 +59,7 @@ section("1. 模块导入 & 基础结构")
 
 try:
     from lagdrive import __version__
-    check(__version__ == "1.1.0", f"版本号 = {__version__}")
+    check(__version__ == "1.2.0", f"版本号 = {__version__}")
 except Exception as e:
     check(False, f"导入 lagdrive 失败: {e}")
 
@@ -92,6 +92,12 @@ try:
     check(True, "quotes 导入成功")
 except Exception as e:
     check(False, f"quotes 导入失败: {e}")
+
+try:
+    from lagdrive.raid import RAIDStorageClient
+    check(True, "raid 模块导入成功")
+except Exception as e:
+    check(False, f"raid 模块导入失败: {e}")
 
 
 # ============================================================
@@ -570,10 +576,609 @@ sb = StorageBlock(block_id=1, data=b"test", offset=0, send_time=monotonic())
 check(sb.size == 4, f"StorageBlock.size = {sb.size}")
 check(sb.confirmed is False, "初始未确认")
 check(sb.expired is False, "初始未过期")
+check(sb.is_parity == -1, "初始非校验块 (is_parity = -1)")
 
 ss = StorageState()
 check(ss.used_bytes == 0, "StorageState 初始 used_bytes = 0")
 check(ss.relay_connected is False, "初始未连接")
+
+
+# ============================================================
+# 15. RAIDMode 枚举测试
+# ============================================================
+section("15. RAIDMode 枚举测试")
+
+from lagdrive.models import RAIDMode
+
+check(RAIDMode.NONE.value == "none", "RAIDMode.NONE = 'none'")
+check(RAIDMode.RAID0.value == "raid0", "RAIDMode.RAID0 = 'raid0'")
+check(RAIDMode.RAID1.value == "raid1", "RAIDMode.RAID1 = 'raid1'")
+check(RAIDMode.RAID5.value == "raid5", "RAIDMode.RAID5 = 'raid5'")
+check(RAIDMode.RAID10.value == "raid10", "RAIDMode.RAID10 = 'raid10'")
+
+# RAIDMode from string
+check(RAIDMode("raid0") == RAIDMode.RAID0, "RAIDMode('raid0') = RAID0")
+check(RAIDMode("raid5") == RAIDMode.RAID5, "RAIDMode('raid5') = RAID5")
+
+
+# ============================================================
+# 16. RAIDStorageClient 单元测试 (无网络)
+# ============================================================
+section("16. RAIDStorageClient 单元测试 (无网络)")
+
+from lagdrive.raid import RAIDStorageClient
+
+# Validation — need >= 2 relays
+try:
+    RAIDStorageClient(relays=[("127.0.0.1", 9527)], mode=RAIDMode.RAID0)
+    check(False, "1 relay 应该抛异常")
+except ValueError:
+    check(True, "1 relay → ValueError")
+
+# RAID 5 needs >= 3
+try:
+    RAIDStorageClient(
+        relays=[("127.0.0.1", 9527), ("127.0.0.1", 9528)],
+        mode=RAIDMode.RAID5,
+    )
+    check(False, "RAID 5 + 2 relays 应该抛异常")
+except ValueError:
+    check(True, "RAID 5 + 2 relays → ValueError")
+
+# RAID 10 needs >= 4 and even
+try:
+    RAIDStorageClient(
+        relays=[("127.0.0.1", 9527), ("127.0.0.1", 9528), ("127.0.0.1", 9529)],
+        mode=RAIDMode.RAID10,
+    )
+    check(False, "RAID 10 + 3 relays 应该抛异常")
+except ValueError:
+    check(True, "RAID 10 + 3 relays → ValueError")
+
+# Valid construction
+try:
+    rc = RAIDStorageClient(
+        relays=[("127.0.0.1", 9527), ("127.0.0.1", 9528)],
+        mode=RAIDMode.RAID0,
+    )
+    check(True, "RAIDStorageClient(RAID0, 2 relays) 构造成功")
+    check(rc.mode == RAIDMode.RAID0, f"mode = {rc.mode.value}")
+    check(len(rc.relays) == 2, f"relays count = {len(rc.relays)}")
+except Exception as e:
+    check(False, f"RAIDStorageClient 构造失败: {e}")
+
+# Valid RAID 5 construction
+try:
+    rc5 = RAIDStorageClient(
+        relays=[("127.0.0.1", 9527), ("127.0.0.1", 9528), ("127.0.0.1", 9529)],
+        mode=RAIDMode.RAID5,
+    )
+    check(True, "RAIDStorageClient(RAID5, 3 relays) 构造成功")
+except Exception as e:
+    check(False, f"RAIDStorageClient RAID5 构造失败: {e}")
+
+# Valid RAID 10 construction
+try:
+    rc10 = RAIDStorageClient(
+        relays=[
+            ("127.0.0.1", 9527), ("127.0.0.1", 9528),
+            ("127.0.0.1", 9529), ("127.0.0.1", 9530),
+        ],
+        mode=RAIDMode.RAID10,
+    )
+    check(True, "RAIDStorageClient(RAID10, 4 relays) 构造成功")
+except Exception as e:
+    check(False, f"RAIDStorageClient RAID10 构造失败: {e}")
+
+
+# ============================================================
+# 17. RAID 目标分发逻辑测试 (无网络)
+# ============================================================
+section("17. RAID 目标分发逻辑测试 (无网络)")
+
+# RAID 0 — round-robin
+rc0 = RAIDStorageClient(
+    relays=[("h0", 0), ("h1", 0), ("h2", 0)],
+    mode=RAIDMode.RAID0,
+)
+targets_b0 = rc0._get_targets(
+    StorageBlock(block_id=0, data=b"x", offset=0, send_time=0), 3
+)
+targets_b1 = rc0._get_targets(
+    StorageBlock(block_id=1, data=b"x", offset=0, send_time=0), 3
+)
+targets_b2 = rc0._get_targets(
+    StorageBlock(block_id=2, data=b"x", offset=0, send_time=0), 3
+)
+check(targets_b0 == [0], f"RAID0 block0 → relay {targets_b0}")
+check(targets_b1 == [1], f"RAID0 block1 → relay {targets_b1}")
+check(targets_b2 == [2], f"RAID0 block2 → relay {targets_b2}")
+
+# RAID 1 — all relays
+rc1 = RAIDStorageClient(
+    relays=[("h0", 0), ("h1", 0)],
+    mode=RAIDMode.RAID1,
+)
+targets_m = rc1._get_targets(
+    StorageBlock(block_id=0, data=b"x", offset=0, send_time=0), 2
+)
+check(targets_m == [0, 1], f"RAID1 block0 → relays {targets_m}")
+
+# RAID 5 — data and parity targets (3 relays, stripe_size=2)
+# Stripe 0 parity → relay 0; data blocks → relays 1, 2
+rc5test = RAIDStorageClient(
+    relays=[("h0", 0), ("h1", 0), ("h2", 0)],
+    mode=RAIDMode.RAID5,
+)
+targets_5_0 = rc5test._get_targets(
+    StorageBlock(block_id=0, data=b"x", offset=0, send_time=0), 3
+)
+targets_5_1 = rc5test._get_targets(
+    StorageBlock(block_id=1, data=b"x", offset=0, send_time=0), 3
+)
+# Stripe 1 parity → relay 1; data blocks → relays 0, 2
+targets_5_2 = rc5test._get_targets(
+    StorageBlock(block_id=2, data=b"x", offset=0, send_time=0), 3
+)
+check(targets_5_0 == [1], f"RAID5 block0 → relay {targets_5_0} (parity on 0)")
+check(targets_5_1 == [2], f"RAID5 block1 → relay {targets_5_1} (parity on 0)")
+check(targets_5_2 == [0], f"RAID5 block2 → relay {targets_5_2} (parity on 1)")
+
+# RAID 10 — mirrored pairs
+rc10test = RAIDStorageClient(
+    relays=[("h0", 0), ("h1", 0), ("h2", 0), ("h3", 0)],
+    mode=RAIDMode.RAID10,
+)
+targets_10_0 = rc10test._get_targets(
+    StorageBlock(block_id=0, data=b"x", offset=0, send_time=0), 4
+)
+targets_10_1 = rc10test._get_targets(
+    StorageBlock(block_id=1, data=b"x", offset=0, send_time=0), 4
+)
+check(targets_10_0 == [0, 1], f"RAID10 block0 → pair {targets_10_0}")
+check(targets_10_1 == [2, 3], f"RAID10 block1 → pair {targets_10_1}")
+
+
+# ============================================================
+# 18. RAID 5 奇偶校验计算测试 (无网络)
+# ============================================================
+section("18. RAID 5 奇偶校验计算测试 (无网络)")
+
+from lagdrive.storage import RingBuffer
+
+# Create RAID5 client (3 relays)
+rc5parity = RAIDStorageClient(
+    relays=[("h0", 0), ("h1", 0), ("h2", 0)],
+    mode=RAIDMode.RAID5,
+)
+
+# Manually test parity computation
+data_a = b'\xff\x00\xff\x00'
+data_b = b'\x00\xff\x00\xff'
+expected_parity = bytes(a ^ b for a, b in zip(data_a, data_b))
+check(expected_parity == b'\xff\xff\xff\xff', f"XOR 校验 = {expected_parity.hex()}")
+
+# Build parity from ring buffer blocks (block_size=4 → each 4-byte chunk = 1 block)
+ring_p = RingBuffer(max_bytes=100000, block_size=4)
+blocks = ring_p.write(data_a + data_b)  # 2 blocks: data_a and data_b
+check(len(blocks) == 2, f"8 bytes / 4 block_size = {len(blocks)} blocks")
+parity_blocks = rc5parity._build_raid5_parity(blocks, stripe_size=2, ring=ring_p)
+check(len(parity_blocks) == 1, f"2 数据块 → {len(parity_blocks)} 个校验块")
+check(parity_blocks[0].is_parity >= 0, f"parity block.is_parity = {parity_blocks[0].is_parity} (relay index)")
+
+# Verify parity data is correct XOR of the two data blocks
+computed_xor = bytes(a ^ b for a, b in zip(blocks[0].data, blocks[1].data))
+check(parity_blocks[0].data == computed_xor, "校验块 = XOR(数据块0, 数据块1)")
+
+# Parity IDs don't collide with data block IDs
+data_ids = {b.block_id for b in blocks}
+parity_ids = {b.block_id for b in parity_blocks}
+check(data_ids.isdisjoint(parity_ids), "校验块 ID 不与数据块 ID 冲突")
+
+
+# ============================================================
+# 19. RingBuffer parity block 排除测试 (无网络)
+# ============================================================
+section("19. RingBuffer 校验块排除测试 (无网络)")
+
+ring_ep = RingBuffer(max_bytes=100000, block_size=100)
+
+# Write normal data
+data_blocks = ring_ep.write(b"hello world")
+check(len(data_blocks) == 1, "普通写入 1 block")
+
+# Write a parity block
+parity_block = ring_ep.write(b"parity data", is_parity=0)  # parity relay 0
+check(len(parity_block) == 1, "校验写入 1 block")
+check(parity_block[0].is_parity >= 0, f"is_parity = {parity_block[0].is_parity}")
+
+# Read should return data blocks but skip parity
+read_data = ring_ep.read(0, 11)
+check(read_data == b"hello world", f"读回数据不含校验: {read_data!r}")
+
+# Stats should include parity block
+stats_ep = ring_ep.stats
+check(stats_ep["total_blocks"] == 2, f"total_blocks = {stats_ep['total_blocks']} (含校验)")
+
+
+# ============================================================
+# 20. RAID + 多 Relay 集成测试
+# ============================================================
+section("20. RAID + 多 Relay 集成测试")
+
+skip_raid_relay = skip_network  # Reuse --quick flag
+
+if skip_raid_relay:
+    info("--quick: 跳过 RAID Relay 集成测试 (需要本地 Relay)")
+else:
+    # Start 3 relays for RAID 5
+    from lagdrive.relay import EchoRelay
+    relays_list = []
+    relay_servers = []
+    for i in range(3):
+        r = EchoRelay("127.0.0.1", 0)
+        r._server = r._create_server()
+        port = r._server.server_address[1]
+        r._thread = __import__('threading').Thread(
+            target=r._server.serve_forever, daemon=True
+        )
+        r._thread.start()
+        relays_list.append(("127.0.0.1", port))
+        relay_servers.append(r)
+    time.sleep(0.3)
+
+    try:
+        # RAID 0 — test striping
+        raid0 = RAIDStorageClient(
+            relays=relays_list[:2], mode=RAIDMode.RAID0, block_size=100,
+        )
+        raid0.connect()
+        time.sleep(0.2)
+        check(raid0.connected, "RAID0 已连接")
+
+        data_raid0 = b"RAID0 striping test data here!!"
+        w0 = raid0.write(data_raid0)
+        check(w0["blocks_written"] >= 1, f"RAID0 写入 {w0['blocks_written']} blocks")
+        check(w0["raid_mode"] == "raid0", f"raid_mode = {w0['raid_mode']}")
+        read0 = raid0.read(0, len(data_raid0))
+        check(read0 == data_raid0, f"RAID0 读回 = {read0!r}")
+        raid0.disconnect()
+
+        # RAID 1 — test mirroring
+        data_raid1 = b"RAID1 mirror!"
+        raid1 = RAIDStorageClient(
+            relays=relays_list[:2], mode=RAIDMode.RAID1, block_size=100,
+        )
+        raid1.connect()
+        time.sleep(0.2)
+        w1 = raid1.write(data_raid1)
+        check(w1["blocks_written"] >= 1, f"RAID1 写入 {w1['blocks_written']} blocks")
+        check(w1["raid_mode"] == "raid1", f"raid_mode = {w1['raid_mode']}")
+        check(w1["physical_sends"] >= 2, f"RAID1 physical_sends = {w1['physical_sends']} (镜像)")
+        read1 = raid1.read(0, len(data_raid1))
+        check(read1 == data_raid1, f"RAID1 读回 = {read1!r}")
+        raid1.disconnect()
+
+        # RAID 5 — test striping + parity
+        data_raid5 = b"RAID5 parity test"
+        raid5 = RAIDStorageClient(
+            relays=relays_list, mode=RAIDMode.RAID5, block_size=100,
+        )
+        raid5.connect()
+        time.sleep(0.2)
+        w5 = raid5.write(data_raid5)
+        check(w5["blocks_written"] >= 1, f"RAID5 写入 {w5['blocks_written']} blocks")
+        check(w5["raid_mode"] == "raid5", f"raid_mode = {w5['raid_mode']}")
+        read5 = raid5.read(0, len(data_raid5))
+        check(read5 == data_raid5, f"RAID5 读回 = {read5!r}")
+
+        # Verify stats
+        s5 = raid5.stats
+        check(s5["raid_mode"] == "raid5", f"stats raid_mode = {s5['raid_mode']}")
+        check(s5["relay_count"] == 3, f"stats relay_count = {s5['relay_count']}")
+        raid5.disconnect()
+
+        # RAID 10 — test mirror + stripe (need 4 relays)
+        relay4 = EchoRelay("127.0.0.1", 0)
+        relay4._server = relay4._create_server()
+        port4 = relay4._server.server_address[1]
+        relay4._thread = __import__('threading').Thread(
+            target=relay4._server.serve_forever, daemon=True
+        )
+        relay4._thread.start()
+        relays_4 = relays_list + [("127.0.0.1", port4)]
+        time.sleep(0.2)
+
+        data_raid10 = b"RAID10 test data"
+        raid10 = RAIDStorageClient(
+            relays=relays_4, mode=RAIDMode.RAID10, block_size=100,
+        )
+        raid10.connect()
+        time.sleep(0.2)
+        w10 = raid10.write(data_raid10)
+        check(w10["blocks_written"] >= 1, f"RAID10 写入 {w10['blocks_written']} blocks")
+        check(w10["raid_mode"] == "raid10", f"raid_mode = {w10['raid_mode']}")
+        read10 = raid10.read(0, len(data_raid10))
+        check(read10 == data_raid10, f"RAID10 读回 = {read10!r}")
+        raid10.disconnect()
+        relay4.stop()
+
+    except Exception as e:
+        check(False, f"RAID 集成测试异常: {e}")
+
+    for rs in relay_servers:
+        rs.stop()
+    time.sleep(0.2)
+
+
+# ============================================================
+# 21. RAID 容量缩放测试 (Monitor)
+# ============================================================
+section("21. RAID 容量缩放测试 (Monitor)")
+
+from lagdrive.monitor import MonitorConfig
+
+cfg_raid0 = MonitorConfig(
+    raid_mode=RAIDMode.RAID0,
+    relays=[("h", 0), ("h", 1), ("h", 2)],
+)
+m_raid = Monitor(cfg_raid0)
+base_bdp = 100000.0
+scaled = m_raid._raid_capacity(base_bdp)
+check(scaled == base_bdp * 3, f"RAID0 容量 = {scaled} (期望 {base_bdp * 3})")
+
+cfg_raid1 = MonitorConfig(raid_mode=RAIDMode.RAID1, relays=[("h", 0), ("h", 1)])
+m_raid1 = Monitor(cfg_raid1)
+check(m_raid1._raid_capacity(base_bdp) == base_bdp, "RAID1 容量 = base")
+
+cfg_raid5 = MonitorConfig(
+    raid_mode=RAIDMode.RAID5,
+    relays=[("h", 0), ("h", 1), ("h", 2)],
+)
+m_raid5 = Monitor(cfg_raid5)
+check(m_raid5._raid_capacity(base_bdp) == base_bdp * 2, "RAID5 (3 relays) 容量 = 2x base")
+
+cfg_raid10 = MonitorConfig(
+    raid_mode=RAIDMode.RAID10,
+    relays=[("h", 0), ("h", 1), ("h", 2), ("h", 3)],
+)
+m_raid10 = Monitor(cfg_raid10)
+check(m_raid10._raid_capacity(base_bdp) == base_bdp * 2, "RAID10 (4 relays) 容量 = 2x base")
+
+
+# ============================================================
+# 22. RAID 讽刺语录测试
+# ============================================================
+section("22. RAID 讽刺语录测试")
+
+from lagdrive.quotes import RAID_STRIPED, RAID_MIRRORED, RAID_PARITY, RAID_TEN
+
+check(len(RAID_STRIPED) >= 3, f"RAID 条带语录 = {len(RAID_STRIPED)} 条")
+check(len(RAID_MIRRORED) >= 3, f"RAID 镜像语录 = {len(RAID_MIRRORED)} 条")
+check(len(RAID_PARITY) >= 3, f"RAID 校验语录 = {len(RAID_PARITY)} 条")
+check(len(RAID_TEN) >= 3, f"RAID10 语录 = {len(RAID_TEN)} 条")
+
+q_raid0 = select_quote(0, 0, 0, 0, 0, storage_event="raid0")
+check(q_raid0 in RAID_STRIPED, f"raid0 → 条带语录: \"{q_raid0[:30]}...\"")
+
+q_raid1 = select_quote(0, 0, 0, 0, 0, storage_event="raid1")
+check(q_raid1 in RAID_MIRRORED, f"raid1 → 镜像语录: \"{q_raid1[:30]}...\"")
+
+q_raid5 = select_quote(0, 0, 0, 0, 0, storage_event="raid5")
+check(q_raid5 in RAID_PARITY, f"raid5 → 校验语录: \"{q_raid5[:30]}...\"")
+
+q_raid10 = select_quote(0, 0, 0, 0, 0, storage_event="raid10")
+check(q_raid10 in RAID_TEN, f"raid10 → RAID10 语录: \"{q_raid10[:30]}...\"")
+
+
+# ============================================================
+# 23. LagDriveAPI RAID 接口测试
+# ============================================================
+section("23. LagDriveAPI RAID 接口测试")
+
+api_raid = LagDriveAPI(
+    target="1.1.1.1",
+    raid_mode="raid0",
+    relays=[("127.0.0.1", 9527), ("127.0.0.1", 9528)],
+)
+check(api_raid._config.raid_mode == RAIDMode.RAID0, "API RAID 模式 = RAID0")
+check(len(api_raid._config.relays) == 2, "API relays count = 2")
+
+# Enable RAID via API method (without connecting)
+api_raid2 = LagDriveAPI(target="1.1.1.1")
+check(api_raid2._config.raid_mode == RAIDMode.NONE, "API 默认 RAID = NONE")
+
+
+# ============================================================
+# 19b. RAID 5 XOR Reconstruction Tests (no network)
+# ============================================================
+section("19b. RAID 5 XOR 重建测试 (无网络)")
+
+from lagdrive.models import RelayHealth, PerRelayRTT
+
+# Build parity and test reconstruction
+rc5_recon = RAIDStorageClient(
+    relays=[("h0", 0), ("h1", 0), ("h2", 0)],
+    mode=RAIDMode.RAID5,
+    block_size=10,
+)
+ring_recon = RingBuffer(max_bytes=100000, block_size=10)
+rc5_recon._ring = ring_recon  # share the same ring
+
+# Write two data blocks + parity
+d_blocks = ring_recon.write(b"A" * 10 + b"B" * 10)
+check(len(d_blocks) == 2, f"2 data blocks from 20 bytes / block_size=10")
+p_blocks = rc5_recon._build_raid5_parity(d_blocks, stripe_size=2, ring=ring_recon)
+check(len(p_blocks) == 1, "1 parity block for 2 data blocks")
+
+# Expire block 0, preserving data
+d_blocks[0].expired = True
+d_blocks[0]._original_data = d_blocks[0].data
+d_blocks[0].data = b'\x00' * 10
+
+# Reconstruct block 0 from parity + surviving block 1
+recovered = rc5_recon._reconstruct_block(d_blocks[0].block_id, 10)
+check(recovered == b"A" * 10, f"Reconstructed block 0 = {recovered!r}")
+
+# Reconstruct block 1 from parity + surviving block 0
+d_blocks[0].expired = False
+d_blocks[0].data = d_blocks[0]._original_data
+d_blocks[1].expired = True
+d_blocks[1]._original_data = d_blocks[1].data
+d_blocks[1].data = b'\x00' * 10
+
+recovered1 = rc5_recon._reconstruct_block(d_blocks[1].block_id, 10)
+check(recovered1 == b"B" * 10, f"Reconstructed block 1 = {recovered1!r}")
+
+# _has_parity check
+check(rc5_recon._has_parity(d_blocks[0].block_id), "_has_parity returns True for stripe")
+
+# Test with send_failed flag
+d_blocks[1].expired = False
+d_blocks[1].send_failed = True
+d_blocks[1].data = d_blocks[1]._original_data
+recovered_sf = rc5_recon._reconstruct_block(d_blocks[1].block_id, 10)
+check(recovered_sf == b"B" * 10, "Reconstruction works for send_failed blocks too")
+
+
+# ============================================================
+# 19c. RelayHealth & PerRelayRTT Tests (no network)
+# ============================================================
+section("19c. RelayHealth & PerRelayRTT 测试 (无网络)")
+
+# RelayHealth
+rh = RelayHealth(address=("127.0.0.1", 9527))
+check(rh.alive is True, "Initial relay health = alive")
+check(rh.consecutive_failures == 0, "Initial failures = 0")
+check(rh.total_sends == 0, "Initial sends = 0")
+
+# PerRelayRTT
+rtt_t = PerRelayRTT()
+rtt_t.update(50.0)
+rtt_t.update(60.0)
+rtt_t.update(70.0)
+check(abs(rtt_t.avg - 60.0) < 0.1, f"Per-relay RTT avg = {rtt_t.avg:.1f} (expect 60.0)")
+check(rtt_t.current == 70.0, f"Per-relay RTT current = {rtt_t.current}")
+check(len(rtt_t.samples) == 3, f"Per-relay RTT samples = {len(rtt_t.samples)}")
+
+# Sliding window overflow
+rtt_big = PerRelayRTT()
+for i in range(20):
+    rtt_big.update(float(i))
+check(len(rtt_big.samples) == 15, f"Sliding window capped at 15 (got {len(rtt_big.samples)})")
+check(rtt_big.current == 19.0, f"Last value = {rtt_big.current}")
+
+# Relay health in RAIDStorageClient
+check(len(rc5_recon._relay_health) == 3, "3 relay health entries")
+check(rc5_recon._relay_health[0].address == ("h0", 0), "Relay 0 address = h0:0")
+
+# Per-relay RTT in RAIDStorageClient
+check(len(rc5_recon._relay_rtt) == 3, "3 relay RTT trackers")
+check("relay_rtt" in rc5_recon.stats, "stats includes relay_rtt")
+check("relay_health" in rc5_recon.stats, "stats includes relay_health")
+check("degraded" in rc5_recon.stats, "stats includes degraded flag")
+check(rc5_recon.stats["degraded"] is False, "Initially not degraded")
+
+
+# ============================================================
+# 19d. Degraded Read Path Tests (no network)
+# ============================================================
+section("19d. 降级读取测试 (无网络)")
+
+# RAID5 degraded read: one block expired, reconstruct from parity
+rc5_dr = RAIDStorageClient(
+    relays=[("h0", 0), ("h1", 0), ("h2", 0)],
+    mode=RAIDMode.RAID5,
+    block_size=10,
+)
+ring_dr = RingBuffer(max_bytes=100000, block_size=10)
+rc5_dr._ring = ring_dr
+
+test_data = b"HELLO" * 2 + b"WORLD" * 2  # 20 bytes = 2 blocks of 10
+dr_blocks = ring_dr.write(test_data)
+check(len(dr_blocks) == 2, "Degraded read: 2 data blocks written")
+
+dr_parity = rc5_dr._build_raid5_parity(dr_blocks, stripe_size=2, ring=ring_dr)
+check(len(dr_parity) == 1, "Degraded read: 1 parity block")
+
+# Normal read (all blocks alive)
+normal_read = rc5_dr.read(0, 20)
+check(normal_read == test_data, f"Normal read = {normal_read!r}")
+
+# Expire block 0
+dr_blocks[0].expired = True
+dr_blocks[0]._original_data = dr_blocks[0].data
+dr_blocks[0].data = b'\x00' * 10
+
+# Degraded read should reconstruct block 0 from parity
+degraded_read = rc5_dr.read(0, 20)
+check(degraded_read == test_data, f"Degraded read reconstructed = {degraded_read!r}")
+
+# Read a subset (only the reconstructed block)
+partial = rc5_dr.read(0, 10)
+check(partial == b"HELLO" * 2, f"Partial degraded read block 0 = {partial!r}")
+
+# Non-RAID5 mode: no reconstruction
+rc5_dr.mode = RAIDMode.RAID0
+no_recon = rc5_dr.read(0, 20)
+check(no_recon[:10] == b'\x00' * 10, "RAID0 mode: no reconstruction, zeros for expired")
+
+
+# ============================================================
+# 22b. Per-Relay RTT in Stats & Degraded Quotes
+# ============================================================
+section("22b. Per-Relay RTT 统计 & 降级语录测试")
+
+# Per-relay RTT in stats
+rc5_rtt = RAIDStorageClient(
+    relays=[("h0", 0), ("h1", 0), ("h2", 0)],
+    mode=RAIDMode.RAID5,
+)
+st = rc5_rtt.stats
+check("relay_rtt" in st, "stats has relay_rtt")
+check(len(st["relay_rtt"]) == 3, "3 relay RTT entries")
+check(st["relay_rtt"][0]["avg_ms"] == 0.0, "Initial relay RTT avg = 0")
+check("relay_alive_count" in st, "stats has relay_alive_count")
+check(st["relay_alive_count"] == 3, "All 3 relays alive initially")
+check(st["dead_relays"] == [], "No dead relays initially")
+
+# Simulate relay failure
+rc5_rtt._relay_health[1].alive = False
+rc5_rtt._relay_health[1].consecutive_failures = 5
+st2 = rc5_rtt.stats
+check(st2["degraded"] is True, "degraded = True after relay failure")
+check(st2["relay_alive_count"] == 2, "2 relays alive after failure")
+check(st2["relay_dead_count"] == 1, "1 relay dead")
+check(len(st2["dead_relays"]) == 1, "1 dead relay in list")
+check(st2["dead_relays"][0]["index"] == 1, "Dead relay index = 1")
+check(st2["relay_connected"] is True, "Still connected (at least 1 alive)")
+
+# Degraded quotes
+from lagdrive.quotes import RAID_DEGRADED, RAID_REBUILT
+q_degraded = select_quote(0, 0, 0, 0, 0, storage_event="raid_degraded")
+check(q_degraded in RAID_DEGRADED, f"raid_degraded quote: \"{q_degraded[:30]}...\"")
+
+q_rebuilt = select_quote(0, 0, 0, 0, 0, storage_event="raid_rebuilt")
+check(q_rebuilt in RAID_REBUILT, f"raid_rebuilt quote: \"{q_rebuilt[:30]}...\"")
+
+
+# ============================================================
+# 23b. RAID Mode Switch API Test (no network)
+# ============================================================
+section("23b. RAID 模式切换 API 测试 (无网络)")
+
+api_switch = LagDriveAPI(target="1.1.1.1")
+check(api_switch._config.raid_mode == RAIDMode.NONE, "Initial mode = NONE")
+
+# switch_raid_mode method exists
+check(hasattr(api_switch, 'switch_raid_mode'), "switch_raid_mode method exists")
+
+# StorageBlock new fields
+from lagdrive.models import StorageBlock
+sb_new = StorageBlock(block_id=0, data=b"test", offset=0, send_time=0.0)
+check(sb_new.relay_targets == [], "StorageBlock.relay_targets defaults to []")
+check(sb_new.send_failed is False, "StorageBlock.send_failed defaults to False")
+check(sb_new._original_data == b'', "StorageBlock._original_data defaults to b''")
 
 
 # ============================================================

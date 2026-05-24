@@ -100,7 +100,13 @@ class Dashboard:
             Layout(name="left",  ratio=2),
             Layout(name="right", ratio=3),
         )
-        storage_size = 8 if self._storage_state is not None else 3
+        ss = self._storage_state
+        if ss is not None:
+            relay_count = len(ss.get("relay_health", []))
+            degraded_extra = 1 if ss.get("degraded") else 0
+            storage_size = 8 + relay_count + degraded_extra
+        else:
+            storage_size = 3
         layout["header"].update(self._build_header())
         layout["left"].update(self._build_cluster_panel())
         layout["right"].split_column(
@@ -288,7 +294,10 @@ class Dashboard:
         total = ss.get("total_blocks", 0)
         confirmed = ss.get("confirmed_blocks", 0)
         expired = ss.get("expired_blocks", 0)
+        lost = ss.get("lost_bytes", 0)
         connected = ss.get("relay_connected", False)
+        raid_mode = ss.get("raid_mode", "none")
+        relay_count = ss.get("relay_count", 0)
 
         table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1), expand=True)
         table.add_column(style=STYLES["stat_label"], ratio=1)
@@ -296,6 +305,20 @@ class Dashboard:
 
         conn_style = STYLES["stat_good"] if connected else STYLES["stat_bad"]
         conn_text = "Connected" if connected else "Disconnected"
+
+        # RAID mode label
+        if raid_mode and raid_mode != "none":
+            mode_labels = {
+                "raid0":  "RAID 0 条带",
+                "raid1":  "RAID 1 镜像",
+                "raid5":  "RAID 5 校验",
+                "raid10": "RAID 10 镜像条带",
+            }
+            mode_text = mode_labels.get(raid_mode, raid_mode.upper())
+            table.add_row(
+                "模式",
+                Text(f"{mode_text}  ({relay_count} relays)", style="bold #9B59B6"),
+            )
 
         table.add_row(
             "Used / Capacity",
@@ -305,10 +328,39 @@ class Dashboard:
             "Blocks",
             Text(f"{total}  (confirmed: {confirmed}, expired: {expired})", style=STYLES["stat_value"]),
         )
+        if lost > 0:
+            lost_str, lost_unit = self._format_bytes(lost)
+            table.add_row(
+                "Lost",
+                Text(f"{lost_str} {lost_unit}", style=STYLES["stat_bad"]),
+            )
         table.add_row(
             "Relay",
             Text(conn_text, style=conn_style),
         )
+
+        # Per-relay health and RTT
+        relay_health = ss.get("relay_health", [])
+        relay_rtt = ss.get("relay_rtt", [])
+        if relay_health:
+            for i, rh in enumerate(relay_health):
+                addr = rh["address"]
+                alive = rh["alive"]
+                rstyle = STYLES["stat_good"] if alive else STYLES["stat_bad"]
+                status = "OK" if alive else "DOWN"
+                rtt_str = ""
+                if i < len(relay_rtt) and relay_rtt[i]["avg_ms"] > 0:
+                    rtt_str = f"  RTT:{relay_rtt[i]['avg_ms']:.0f}ms"
+                table.add_row(
+                    f"  Relay {i}",
+                    Text(f"{addr} {status}{rtt_str}", style=rstyle),
+                )
+
+        if ss.get("degraded"):
+            table.add_row(
+                "",
+                Text("DEGRADED MODE", style="bold #E74C3C"),
+            )
 
         return Panel(
             table,
@@ -340,6 +392,7 @@ class Dashboard:
 
         keys = Text()
         keys.append(f"  {s_label}", s_style)
+        keys.append("  [M]模式", "bold #9B59B6")
         keys.append("  [W]写入", "bold #3498DB")
         keys.append("  [R]读取", "bold #3498DB")
         keys.append("  [I]状态", "bold #3498DB")

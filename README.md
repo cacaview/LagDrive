@@ -8,7 +8,7 @@
 Capacity(bytes) = Bandwidth(bps) × RTT(s) / 8
 ```
 
-![LagDrive](https://img.shields.io/badge/LagDrive-v1.1-blue) ![Python](https://img.shields.io/badge/Python-3.10+-green) ![License](https://img.shields.io/badge/License-MIT-yellow)
+![LagDrive](https://img.shields.io/badge/LagDrive-v1.2-blue) ![Python](https://img.shields.io/badge/Python-3.10+-green) ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 ## 它在干什么
 
@@ -28,7 +28,7 @@ cd LagDrive
 pip install -e .
 ```
 
-依赖：`rich>=13.0`、`psutil>=5.9`
+依赖：`rich>=13.0`
 
 ## 使用
 
@@ -64,6 +64,43 @@ lagdrive --storage -t 8.8.8.8              # 指定探测目标
 
 仪表盘会显示存储状态面板和簇阵列中存储了数据的格子 `[S]`。
 
+### 3.1 RAID 多副本存储模式
+
+LagDrive 支持 RAID 0/1/5/10 多 Relay 存储模式，数据同时在多条网络管道中传输：
+
+```bash
+# 启动多个 Echo Relay（需多个终端或不同端口）
+lagdrive --relay --relay-port 9527
+lagdrive --relay --relay-port 9528
+
+# RAID 0 — 条带化：数据分散到多个 Relay，带宽叠加，无冗余
+lagdrive --raid-mode raid0 --relays 127.0.0.1:9527 127.0.0.1:9528 --store "hello RAID0"
+
+# RAID 1 — 镜像：每个块复制到所有 Relay，冗余完整
+lagdrive --raid-mode raid1 --relays 127.0.0.1:9527 127.0.0.1:9528 --store "hello RAID1"
+
+# RAID 5 — 条带 + 分布式校验（需 ≥ 3 Relay，可容忍 1 个故障）
+lagdrive --raid-mode raid5 --relays 127.0.0.1:9527 127.0.0.1:9528 127.0.0.1:9529 --store "hello RAID5"
+
+# RAID 10 — 镜像 + 条带（需 ≥ 4 Relay，且为偶数个）
+lagdrive --raid-mode raid10 --relays 127.0.0.1:9527 127.0.0.1:9528 127.0.0.1:9529 127.0.0.1:9530 --store "hello RAID10"
+
+# 读取数据（RAID 模式下读回的是原始数据，校验块自动排除）
+lagdrive --raid-mode raid0 --relays 127.0.0.1:9527 127.0.0.1:9528 --read 0 10
+
+# RAID 模式仪表盘
+lagdrive --raid-mode raid0 --relays 127.0.0.1:9527 127.0.0.1:9528 --storage
+```
+
+| RAID 模式 | 最少 Relay | 冗余 | 容量倍数 | 特点 |
+|-----------|-----------|------|---------|------|
+| RAID 0 | 2 | 无 | ×N | 带宽叠加，一个挂全挂 |
+| RAID 1 | 2 | N 份 | ×1 | 完整冗余，带宽不增 |
+| RAID 5 | 3 | 1 份校验 | ×(N-1) | 可容忍 1 个 Relay 故障，自动 XOR 重建，Per-Relay RTT 独立测量 |
+| RAID 10 | 4 (偶数) | 镜像对 | ×(N/2) | 又快又安全 |
+
+RAID 5 故障检测：每个 tick 轮询各 Relay 的连接状态，故障 Relay 被跳过，降级模式下自动触发 XOR 重建读取。仪表盘显示每个 Relay 的地址、存活状态和独立 RTT。按 `M` 可在运行时切换 RAID 模式。
+
 ### 4. 探测模式（无需 Relay）
 
 ```bash
@@ -82,6 +119,7 @@ lagdrive --snapshot                         # JSON 轮询模式
 | 按键 | 功能 | 说明 |
 |------|------|------|
 | `S` | 启用/断开存储 | 连接或断开 Echo Relay |
+| `M` | 切换 RAID 模式 | 交互式选择 RAID 级别和 Relay 地址 |
 | `W` | 写入数据 | 输入文本，注入网络存储 |
 | `R` | 读取数据 | 按 offset/length 读回数据 |
 | `I` | 存储状态 | 在命令栏显示当前存储信息 |
@@ -115,6 +153,17 @@ api.write(b"Hello!")                   # 数据注入网络
 data = api.read(0, 6)                  # 读回 b"Hello!"
 info = api.storage_info()              # 存储状态
 api.stop()
+
+# ── RAID 多副本存储 ──
+api = LagDriveAPI(target="1.1.1.1")
+api.enable_raid_storage(
+    relays=[("127.0.0.1", 9527), ("127.0.0.1", 9528)],
+    mode="raid0",  # "raid0", "raid1", "raid5", "raid10"
+)
+api.start()
+api.write(b"Hello RAID!")              # 数据条带化分发
+info = api.storage_info()              # 包含 raid_mode 和 relay_count
+api.stop()
 ```
 
 ## 架构
@@ -124,12 +173,13 @@ lagdrive/
 ├── __init__.py      # CLI 入口
 ├── __main__.py      # python -m lagdrive
 ├── api.py           # LagDriveAPI — 编程接口
-├── models.py        # 数据模型 (CellState, GridCell, NetworkMetrics, StorageBlock)
+├── models.py        # 数据模型 (CellState, GridCell, NetworkMetrics, StorageBlock, RAIDMode)
 ├── monitor.py       # TCP 探测引擎 (asyncio + ThreadPoolExecutor)
 ├── relay.py         # Echo Relay 服务器 + 线协议
 ├── storage.py       # RingBuffer + StorageClient
+├── raid.py          # RAIDStorageClient — RAID 0/1/5/10 多副本存储
 ├── dashboard.py     # DiskGenius 风格 Rich 终端界面
-└── quotes.py        # 讽刺语录系统 (78 条)
+└── quotes.py        # 讽刺语录系统 (90+ 条，含 RAID 语录)
 ```
 
 ### 存储架构
@@ -158,7 +208,7 @@ lagdrive/
 
 ### 讽刺语录
 
-共 78 条，覆盖 12 个场景：
+共 124 条，覆盖 14 个场景：
 
 | 条件 | 示例 |
 |------|------|
@@ -168,6 +218,8 @@ lagdrive/
 | 写入数据 | 数据已送出。它现在属于互联网了。 |
 | 数据过期 | 存储过期。数据已化作网线中的噪声，回归自然。 |
 | 数据确认 | 数据安然无恙。看来你的路由器今天没有搞破坏。 |
+| RAID 降级 | 一个 Relay 挂了。XOR 校验顶一阵。数学是最好的冗余。 |
+| RAID 恢复 | 所有 Relay 恢复在线。系统从降级模式中醒来。硬盘从不睡觉。 |
 | 退出 | 你的网线现在空空如也，就像刚格式化的硬盘。 |
 | 操作提示 | 40% 概率附带嘲讽后缀，如 "写入成功。一切正常。暂时。" |
 
@@ -184,7 +236,7 @@ python test_api.py --network    # 含吞吐量测试
 ## Roadmap
 
 - [x] **Phase 1 — Echo Relay 存储**：数据真的在网络中循环传输，BDP 就是真实容量
-- [ ] **Phase 2 — RAID 0 (Striping) 模式**：同时向多个 Relay 发包，带宽叠加
+- [x] **Phase 2 — RAID 多副本存储**：同时向多个 Relay 发包，支持 RAID 0（条带）、RAID 1（镜像）、RAID 5（校验 + 故障检测 + XOR 在线重建 + Per-Relay RTT）、RAID 10（镜像条带）
 - [ ] **Phase 3 — FUSE 挂载**：让你真的能在 L: 盘里放一个 txt（然后在断网的一瞬间眼睁睁看着它消失）
 
 ## License
