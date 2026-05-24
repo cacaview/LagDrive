@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lagdrive"
+version = "1.0.0"
+description = "A satirical CLI tool that simulates network latency as virtual disk capacity based on BDP (Bandwidth-Delay Product)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "rich>=13.0",
+    "psutil>=5.9",
+]
+
+[project.scripts]
+lagdrive = "lagdrive:main"
