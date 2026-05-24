@@ -284,7 +284,7 @@ class RAIDStorageClient:
         result = bytearray(length)
         end = offset + length
         n_relays = len(self.relays)
-        stripe_size = n_relays - 1 if n_relays > 0 else 1
+        stripe_size = n_relays - 1
 
         for block in self._ring._blocks.values():
             if block.is_parity >= 0:
@@ -351,7 +351,7 @@ class RAIDStorageClient:
         """
         if stripe_size is None:
             n_relays = len(self.relays)
-            stripe_size = n_relays - 1 if n_relays > 0 else 1
+            stripe_size = n_relays - 1
 
         stripe_idx = missing_block_id // stripe_size
         stripe_start = stripe_idx * stripe_size
@@ -452,3 +452,10 @@ class RAIDStorageClient:
         s["relay_health"] = health_list
         s["relay_rtt"] = rtt_list
         return s
+
+    def clear(self) -> dict:
+        """Clear all stored blocks. Returns summary dict."""
+        with self._lock:
+            stats = self._ring.stats
+            self._ring.clear()
+        return {"cleared": True, "blocks_cleared": stats["total_blocks"]}

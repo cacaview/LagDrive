@@ -45,7 +45,7 @@ class LagDriveAPI:
         relays: list[tuple[str, int]] | None = None,
     ) -> None:
         if isinstance(raid_mode, str):
-            raid_mode = RAIDMode(raid_mode) if raid_mode != "none" else RAIDMode.NONE
+            raid_mode = RAIDMode(raid_mode)
         self._config = MonitorConfig(
             target=target,
             port=port,
@@ -149,10 +149,7 @@ class LagDriveAPI:
         storage = self._monitor._storage
         if storage is None:
             return {"cleared": False, "error": "storage not enabled"}
-        with storage._lock:
-            stats = storage._ring.stats
-            storage._ring.clear()
-        return {"cleared": True, "blocks_cleared": stats["total_blocks"]}
+        return storage.clear()
 
     def enable_storage(self, relay_host: str = "127.0.0.1", relay_port: int = 9527) -> dict:
         """Connect to relay and enable storage at runtime."""

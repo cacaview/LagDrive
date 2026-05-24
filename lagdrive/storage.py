@@ -246,7 +246,7 @@ class StorageClient:
             self._conn.close()
             self._conn = None
             raise
-        self._conn.settimeout(None)
+        self._conn.settimeout(30.0)
         self._connected = True
         self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
         self._recv_thread.start()
@@ -272,12 +272,13 @@ class StorageClient:
             blocks = self._ring.write(data)
             snapshots = [(b.block_id, b.offset, bytes(b.data)) for b in blocks]
 
+        conn = self._conn
         sent = 0
         for bid, offset, blk_data in snapshots:
             try:
                 frame = LagDriveProtocol.encode_write(bid, offset, blk_data)
-                if self._conn:
-                    self._conn.sendall(frame)
+                if conn:
+                    conn.sendall(frame)
                 sent += 1
             except OSError:
                 break
@@ -295,19 +296,28 @@ class StorageClient:
         with self._lock:
             return self._ring.read(offset, length)
 
+    def clear(self) -> dict:
+        """Clear all stored blocks. Returns summary dict."""
+        with self._lock:
+            stats = self._ring.stats
+            self._ring.clear()
+        return {"cleared": True, "blocks_cleared": stats["total_blocks"]}
+
     def send_block(self, block: StorageBlock) -> bool:
         """Send a single block to the relay without ring buffer involvement.
 
         Used by RAIDStorageClient to distribute blocks across relays.
         Returns True on success.
         """
+        conn = self._conn
+        if conn is None:
+            return False
         try:
             frame = LagDriveProtocol.encode_write(block.block_id, block.offset, block.data)
-            if self._conn:
-                self._conn.sendall(frame)
+            conn.sendall(frame)
             return True
         except OSError:
-            self._connected = False  # propagate failure state immediately
+            self._connected = False
             return False
 
     def update_metrics(self, rtt_ms: float, capacity_bytes: float) -> None:
@@ -333,7 +343,10 @@ class StorageClient:
         """Background thread: read ECHO frames and confirm blocks."""
         try:
             while self._connected and self._conn:
-                result = LagDriveProtocol.decode_frame(self._conn)
+                try:
+                    result = LagDriveProtocol.decode_frame(self._conn)
+                except socket.timeout:
+                    continue  # no data within timeout, retry
                 if result is None:
                     break
                 frame_type, body = result

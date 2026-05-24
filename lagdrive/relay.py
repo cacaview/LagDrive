@@ -157,6 +157,8 @@ class EchoRelay:
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=2.0)
             self._server = None
             self._thread = None
 

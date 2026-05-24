@@ -44,6 +44,10 @@ lagdrive --snapshot
 
 Tests use a custom harness (not pytest) with ANSI-colored output and global pass/fail counters. `--quick` skips network tests. Exit code 0/1.
 
+## Development Rules
+
+- **API-first**: Every feature must have a corresponding method in `LagDriveAPI` (`api.py`) before it can be wired into the CLI or dashboard. This ensures all functionality is independently testable and debuggable via `from lagdrive.api import LagDriveAPI`. When adding a new feature, implement the `api.py` method first, add tests in `test_api.py`, then wire it into `__init__.py` / dashboard.
+
 ## Architecture
 
 ### Dependency Layers

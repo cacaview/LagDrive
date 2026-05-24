@@ -66,7 +66,7 @@ class Dashboard:
     def update(
         self,
         metrics: NetworkMetrics | None = None,
-        grid: list[list[GridCell]] | None = None,
+        grid: list[list[GridCell | str]] | None = None,
         quote: str | None = None,
         storage_state: dict | None = None,
         status_msg: str | None = None,

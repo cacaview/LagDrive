@@ -109,7 +109,7 @@ class Monitor:
         try:
             self._loop.run_until_complete(self._run())
         finally:
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown(wait=True)
             self._loop.close()
 
     async def _run(self) -> None:

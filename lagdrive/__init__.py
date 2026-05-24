@@ -644,10 +644,10 @@ def _run_dashboard(target: str, port: int, probe_interval: float,
 
     def poll_loop():
         """Poll API snapshot and push to dashboard."""
+        from .models import NetworkMetrics
         while api.running:
             time.sleep(0.5)
             snap = api.snapshot()
-            from .models import NetworkMetrics
             m = NetworkMetrics()
             m.rtt_current = snap["rtt_current"]
             m.rtt_avg = snap["rtt_avg"]
