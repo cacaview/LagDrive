@@ -242,3 +242,6 @@ python test_api.py --network    # 含吞吐量测试
 ## License
 
 MIT
+
+## 友情链接
+[Linuxdo](https://linux.do)
