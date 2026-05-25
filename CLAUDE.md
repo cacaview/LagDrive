@@ -78,8 +78,39 @@ All Monitor state protected by `threading.Lock`. RingBuffer mutations protected 
 - **RTT**: 3 TCP connect-time probes per tick → sliding window (15 samples) → `rtt_avg`
 - **Throughput**: HTTP download from Cloudflare every 30s → EMA (α=0.3) → `throughput_avg`
 - **BDP**: `throughput_avg × 1M × (rtt_avg / 1000) / 8` → `capacity` bytes
-- **Grid**: 10×10 cells — `STORED` (green [S]) for stored data, `ACTIVE` (blue [·]) for flowing data, `ERROR` (red [!]) for retransmissions, `FREE` (gray [ ]) for unused space
+- **Grid**: 10×10 cells — `STORED` (green [S]) for stored data, `ACTIVE` (blue [·]) for flowing data, `ERROR` (red [!]) for retransmissions, `FREE` (gray [ ]) for unused space. ACTIVE cells pulse with alternating brightness; newly confirmed STORED cells flash briefly.
 - **Quotes**: Priority routing: storage events > loss > RTT extremes > traffic > throughput > capacity > neutral
+- **Sparklines**: RTT, throughput, and loss rate history shown as Unicode block-char mini charts (▁▂▃▄▅▆▇█) in the perf panel.
+- **I/O Rate**: Real-time download/upload rate (bytes/sec) computed from byte deltas between snapshot polls.
+- **Activity Log**: Storage events (write/confirm/expire/lost) tracked in `Monitor._activity_events` (max 50), rendered in a scrolling log panel with timestamps.
+- **Capacity Bar**: Storage usage progress bar with color gradient (green < 60%, yellow < 85%, red ≥ 85%).
+
+### TUI Dashboard Features
+
+**Theme System**: Three built-in themes (DiskGenius Dark, Light Mode, Cyberpunk) defined in `THEMES` dict. `[H]` key cycles themes. Default theme exported as `STYLES` for backward compatibility.
+
+**Adaptive Layout**: Terminal width detected via `Console.size`. Narrow screens (<100 cols) switch to compact layout: no ASCII art header, 5×5 grid, merged panels.
+
+**Inline Modal Dialogs**: Write and read operations use `Dashboard.prompt_inline()` — a TUI-native text input that captures keystrokes character-by-character without leaving the live display. Complex dialogs (storage enable, RAID switch, BDP) still use `Console.input()` with Live pause/resume.
+
+**RAID Topology**: Storage panel shows ASCII topology diagram for multi-relay configs (fan-out for RAID 0/1, data/parity labels for RAID 5, pair brackets for RAID 10). Per-relay health (●/○) and RTT shown inline.
+
+### TUI Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `S` | Toggle storage (connect/disconnect) |
+| `M` | Switch RAID mode |
+| `W` | Write data (inline prompt) |
+| `R` | Read data (inline prompt) |
+| `I` | Show storage info |
+| `C` | Clear all blocks |
+| `H` | Cycle theme (dark → light → cyberpunk) |
+| `P` | One-shot RTT probe |
+| `T` | One-shot throughput test |
+| `A` | Full diagnosis (RTT + throughput + BDP) |
+| `B` | BDP calculator |
+| `Q` | Quit |
 
 ### Storage Architecture
 

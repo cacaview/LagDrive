@@ -5,6 +5,7 @@ from time import monotonic
 __all__ = [
     "RAIDMode", "CellState", "GridCell", "NetworkMetrics",
     "StorageBlock", "StorageState", "RelayHealth", "PerRelayRTT",
+    "ActivityEvent",
 ]
 
 
@@ -41,6 +42,8 @@ class GridCell:
 class NetworkMetrics:
     """Real-time network measurement data."""
     rtt_samples: list[float] = field(default_factory=list)
+    throughput_samples: list[float] = field(default_factory=list)
+    loss_samples: list[float] = field(default_factory=list)
     rtt_current: float = 0.0
     rtt_avg: float = 0.0
     throughput_current: float = 0.0
@@ -52,6 +55,12 @@ class NetworkMetrics:
     fail_count: int = 0
     capacity: float = 0.0
     last_update: float = 0.0
+    # I/O rate tracking (bytes since last snapshot)
+    download_rate: float = 0.0  # bytes/sec
+    upload_rate: float = 0.0    # bytes/sec
+    _prev_downloaded: int = 0
+    _prev_uploaded: int = 0
+    _prev_update_time: float = 0.0
 
     def update_rtt(self, value: float, max_samples: int = 15) -> None:
         self.rtt_current = value
@@ -63,11 +72,31 @@ class NetworkMetrics:
 
     def update_throughput(self, value: float, alpha: float = 0.3) -> None:
         self.throughput_current = value
+        self.throughput_samples.append(value)
+        if len(self.throughput_samples) > 15:
+            self.throughput_samples.pop(0)
         if self.throughput_avg == 0:
             self.throughput_avg = value
         else:
             self.throughput_avg = alpha * value + (1 - alpha) * self.throughput_avg
         self.last_update = monotonic()
+
+    def update_loss(self, max_samples: int = 15) -> None:
+        """Record current loss_rate into the loss history."""
+        self.loss_samples.append(self.loss_rate * 100)
+        if len(self.loss_samples) > max_samples:
+            self.loss_samples.pop(0)
+
+    def compute_io_rate(self) -> None:
+        """Compute download/upload rate from byte deltas since last call."""
+        now = monotonic()
+        dt = now - self._prev_update_time if self._prev_update_time > 0 else 0
+        if dt > 0.5:  # only update if enough time has passed
+            self.download_rate = (self.total_downloaded - self._prev_downloaded) / dt
+            self.upload_rate = (self.total_uploaded - self._prev_uploaded) / dt
+            self._prev_downloaded = self.total_downloaded
+            self._prev_uploaded = self.total_uploaded
+            self._prev_update_time = now
 
     @property
     def bdp(self) -> float:
@@ -150,3 +179,24 @@ class PerRelayRTT:
         if len(self.samples) > max_samples:
             self.samples.pop(0)
         self.avg = sum(self.samples) / len(self.samples)
+
+
+class ActivityEventType(Enum):
+    """Types of storage activity events."""
+    WRITE = "write"
+    CONFIRM = "confirm"
+    EXPIRE = "expire"
+    LOST = "lost"
+    CLEAR = "clear"
+    CONNECT = "connect"
+    DISCONNECT = "disconnect"
+
+
+@dataclass
+class ActivityEvent:
+    """A single storage activity event for the log panel."""
+    time: float
+    event_type: ActivityEventType
+    block_id: int = -1
+    size: int = 0
+    detail: str = ""

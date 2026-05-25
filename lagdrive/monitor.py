@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .models import CellState, GridCell, NetworkMetrics, RAIDMode
+from .models import ActivityEvent, ActivityEventType, CellState, GridCell, NetworkMetrics, RAIDMode
 
 
 @dataclass
@@ -63,6 +63,12 @@ class Monitor:
         self._last_quote: str = ""
         # Storage
         self._storage = None
+        # Activity log
+        self._activity_events: list[ActivityEvent] = []
+        self._prev_confirmed: int = 0
+        self._prev_expired: int = 0
+        self._prev_lost_bytes: int = 0
+        self._prev_write_count: int = 0
 
     def start(self) -> None:
         """Start the probe engine in a background thread."""
@@ -129,6 +135,9 @@ class Monitor:
                 with self._lock:
                     self._calculate_capacity()
                     self._storage_tick()
+                    self._track_storage_activity()
+                    self.metrics.update_loss()
+                    self.metrics.compute_io_rate()
                     self._fire_state_change()
                     self._maybe_fire_quote()
 
@@ -245,6 +254,59 @@ class Monitor:
             return
         storage.update_metrics(self.metrics.rtt_avg, self.metrics.capacity)
 
+    def _track_storage_activity(self) -> None:
+        """Detect storage state changes and log activity events."""
+        storage = self._storage
+        if storage is None:
+            return
+        st = storage.stats
+        now = time.monotonic()
+
+        confirmed = st.get("confirmed_blocks", 0)
+        expired = st.get("expired_blocks", 0)
+        lost_bytes = st.get("lost_bytes", 0)
+        write_count = st.get("write_count", 0)
+        block_size = 65536  # default block size
+
+        if write_count > self._prev_write_count:
+            diff = min(write_count - self._prev_write_count, 5)
+            for _ in range(diff):
+                self._activity_events.append(ActivityEvent(
+                    time=now, event_type=ActivityEventType.WRITE,
+                    size=block_size,
+                ))
+
+        if confirmed > self._prev_confirmed:
+            diff = min(confirmed - self._prev_confirmed, 5)
+            for _ in range(diff):
+                self._activity_events.append(ActivityEvent(
+                    time=now, event_type=ActivityEventType.CONFIRM,
+                    size=block_size,
+                ))
+
+        if expired > self._prev_expired:
+            diff = min(expired - self._prev_expired, 5)
+            for _ in range(diff):
+                self._activity_events.append(ActivityEvent(
+                    time=now, event_type=ActivityEventType.EXPIRE,
+                    size=block_size,
+                ))
+
+        if lost_bytes > self._prev_lost_bytes:
+            self._activity_events.append(ActivityEvent(
+                time=now, event_type=ActivityEventType.LOST,
+                size=lost_bytes - self._prev_lost_bytes,
+            ))
+
+        self._prev_confirmed = confirmed
+        self._prev_expired = expired
+        self._prev_lost_bytes = lost_bytes
+        self._prev_write_count = write_count
+
+        # Trim old events (keep last 50)
+        if len(self._activity_events) > 50:
+            self._activity_events = self._activity_events[-50:]
+
     # --- Grid state management ---
 
     def _update_grid(self) -> None:
@@ -305,18 +367,28 @@ class Monitor:
                 "running": self._running,
                 "rtt_current": self.metrics.rtt_current,
                 "rtt_avg": self.metrics.rtt_avg,
+                "rtt_samples": list(self.metrics.rtt_samples),
                 "throughput_current": self.metrics.throughput_current,
                 "throughput_avg": self.metrics.throughput_avg,
+                "throughput_samples": list(self.metrics.throughput_samples),
                 "loss_rate": self.metrics.loss_rate,
+                "loss_samples": list(self.metrics.loss_samples),
                 "capacity": self.metrics.capacity,
                 "data_in_transit": self.metrics.data_in_transit,
                 "total_downloaded": self.metrics.total_downloaded,
                 "total_uploaded": self.metrics.total_uploaded,
+                "download_rate": self.metrics.download_rate,
+                "upload_rate": self.metrics.upload_rate,
                 "probe_count": self.metrics.probe_count,
                 "fail_count": self.metrics.fail_count,
                 "quote": self._last_quote,
                 "storage": storage.stats if storage else None,
                 "grid": [[cell.state.value for cell in row] for row in self.grid],
+                "activity_events": [
+                    {"time": e.time, "type": e.event_type.value, "block_id": e.block_id,
+                     "size": e.size, "detail": e.detail}
+                    for e in self._activity_events
+                ],
             }
             return snap
 

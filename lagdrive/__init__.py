@@ -325,60 +325,45 @@ def _read_key() -> str | None:
 
 
 def _handle_write(dashboard: Dashboard, api: LagDriveAPI) -> None:
-    """Pause Live, prompt for data, write to storage, resume."""
+    """Prompt for data inline and write to storage."""
     if not api.storage_enabled:
         dashboard.update(status_msg="存储未启用，按 S 启用")
         return
-    if dashboard._live:
-        dashboard._live.stop()
-    console = Console()
-    try:
-        data = console.input("\n[bold cyan]输入要写入的数据:[/bold cyan] ")
-        if not data:
-            dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
-            return
-        result = api.write(data.encode("utf-8"))
-        msg = _snarky(f"写入成功 {result['bytes_written']} bytes ({result['blocks_written']} blocks)")
-        console.print(f"  [green]{msg}[/green]")
-        console.print("  [dim]按任意键继续...[/dim]")
-        _read_key_or_wait(3.0)
-        dashboard.update(status_msg=msg)
-    except (EOFError, KeyboardInterrupt):
+    data = dashboard.prompt_inline("输入要写入的数据:")
+    if not data:
         dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
-    finally:
-        if dashboard._live:
-            dashboard._live.start()
+        return
+    result = api.write(data.encode("utf-8"))
+    msg = _snarky(f"写入成功 {result['bytes_written']} bytes ({result['blocks_written']} blocks)")
+    dashboard.update(status_msg=msg)
 
 
 def _handle_read(dashboard: Dashboard, api: LagDriveAPI) -> None:
-    """Pause Live, prompt for offset/length, read from storage, resume."""
+    """Prompt for offset/length inline and read from storage."""
     if not api.storage_enabled:
         dashboard.update(status_msg="存储未启用，按 S 启用")
         return
-    if dashboard._live:
-        dashboard._live.stop()
-    console = Console()
+    off_str = dashboard.prompt_inline("Offset:")
+    if off_str is None:
+        dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
+        return
+    len_str = dashboard.prompt_inline("Length:")
+    if len_str is None:
+        dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
+        return
     try:
-        off_str = console.input("\n[bold cyan]Offset:[/bold cyan] ")
-        len_str = console.input("[bold cyan]Length:[/bold cyan] ")
         offset = int(off_str)
         length = int(len_str)
-        data = api.read(offset, length)
-        try:
-            text = data.decode("utf-8")
-            console.print(f"  [green]文本: {text}[/green]")
-        except UnicodeDecodeError:
-            console.print(f"  [yellow]Hex: {data.hex()}[/yellow]")
-        console.print(f"  [dim]原始: {data!r}[/dim]")
-        msg = _snarky(f"读取完成 {length} bytes")
-        console.print("  [dim]按任意键继续...[/dim]")
-        _read_key_or_wait(3.0)
-        dashboard.update(status_msg=msg)
-    except (EOFError, KeyboardInterrupt, ValueError):
-        dashboard.update(status_msg=random.choice(_CANCEL_MSGS))
-    finally:
-        if dashboard._live:
-            dashboard._live.start()
+    except ValueError:
+        dashboard.update(status_msg="无效的数字")
+        return
+    data = api.read(offset, length)
+    try:
+        text = data.decode("utf-8")
+        msg = _snarky(f"读取: {text}")
+    except UnicodeDecodeError:
+        msg = _snarky(f"读取: {data.hex()[:64]}...")
+    dashboard.update(status_msg=msg)
 
 
 def _handle_info(dashboard: Dashboard, api: LagDriveAPI) -> None:
@@ -651,19 +636,26 @@ def _run_dashboard(target: str, port: int, probe_interval: float,
             m = NetworkMetrics()
             m.rtt_current = snap["rtt_current"]
             m.rtt_avg = snap["rtt_avg"]
+            m.rtt_samples = snap.get("rtt_samples", [])
             m.throughput_current = snap["throughput_current"]
             m.throughput_avg = snap["throughput_avg"]
+            m.throughput_samples = snap.get("throughput_samples", [])
             m.loss_rate = snap["loss_rate"]
+            m.loss_samples = snap.get("loss_samples", [])
             m.total_downloaded = snap["total_downloaded"]
             m.total_uploaded = snap["total_uploaded"]
+            m.download_rate = snap.get("download_rate", 0)
+            m.upload_rate = snap.get("upload_rate", 0)
             m.probe_count = snap["probe_count"]
             m.fail_count = snap["fail_count"]
+            m.capacity = snap.get("capacity", 0)
             grid_data = snap.get("grid", [])
             dashboard.update(
                 metrics=m,
                 grid=grid_data,
                 quote=snap["quote"],
                 storage_state=snap.get("storage"),
+                activity_events=snap.get("activity_events", []),
             )
 
     api.start()
@@ -698,6 +690,9 @@ def _run_dashboard(target: str, port: int, probe_interval: float,
                     _handle_probe_all(dashboard, api)
                 elif key == 'b':
                     _handle_bdp(dashboard, api)
+                elif key == 'h':
+                    name = dashboard.cycle_theme()
+                    dashboard.update(status_msg=_snarky(f"主题切换: {name}"))
             time.sleep(0.05)
     except KeyboardInterrupt:
         pass
